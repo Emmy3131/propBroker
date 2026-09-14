@@ -2,7 +2,7 @@ const crypto = require("crypto");
 
 const Session = require("../models/SessionModel");
 
-const AppError = require("../utils/AppError");
+const AppError = require("./../utils/appError");
 
 const { hashRefreshToken, hashCsrfToken } = require("../utils/authTokens");
 
