@@ -4,7 +4,7 @@ const QRCode = require("qrcode");
 
 const User = require("../models/UserModel");
 
-const AppError = require("../utils/AppError");
+const AppError = require("./../utils/appError");
 
 const {
   generateTotpSecret,
