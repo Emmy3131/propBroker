@@ -17,8 +17,8 @@ const {
 } = require("../utils/totp");
 
 const catchAsync = require("../utils/catchAsync");
-const TwoFactorChallenge = require("../models/TwoFactorChallengeModel");
-const { createSession } = require("../utils/session");
+const TwoFactorChallenge = require("../models/TwiFactorChallengeModel");
+const { createSession } = require("../utils/sessions");
 const {
   generateRefreshToken,
   hashRefreshToken,

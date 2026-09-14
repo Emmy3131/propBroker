@@ -8,7 +8,7 @@ const protectCsrf = require("../middlewares/csrfMiddlewares");
 
 const { loginLimiter } = require("../middlewares/rateLimiters");
 
-const twoFactorController = require("../controllers/twoFactorController");
+const twoFactorController = require("../controllers/2FAChallengeController");
 
 const router = express.Router();
 

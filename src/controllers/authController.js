@@ -20,7 +20,7 @@ const { sendVerificationEmail } = require("../utils/email");
 const { getRefreshTokenCookieOptions } = require("../config/cookies");
 
 const { generateTotpSecret } = require("../utils/totp");
-const TwoFactorChallenge = require("../models/TwoFactorChallengeModel");
+const TwoFactorChallenge = require("./../models/TwiFactorChallengeModel");
 
 // =========================================================
 // CREATE SESSION
@@ -923,4 +923,4 @@ exports.logoutAllSessions = catchAsync(async (req, res) => {
 
 //     csrfToken,
 //   });
-// }
+// };

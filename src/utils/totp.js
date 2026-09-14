@@ -1,17 +1,18 @@
 const crypto = require("crypto");
 
-const { authenticator } = require("otplib");
+const otplib = require("otplib");
 
-const { encrypt, decrypt } = require("./encryption");
+const {
+  encrypt,
+  decrypt,
+} = require("./encryption");
 
 // =========================================================
-// TOTP CONFIGURATION
+// GET AUTHENTICATOR
 // =========================================================
 
-authenticator.options = {
-  step: 30,
-  window: 1,
-};
+const authenticator =
+  otplib.authenticator;
 
 // =========================================================
 // GENERATE SECRET
@@ -22,14 +23,18 @@ const generateTotpSecret = () => {
 };
 
 // =========================================================
-// CREATE OTP AUTHENTICATION URI
+// GENERATE OTP AUTH URL
 // =========================================================
 
-const generateOtpAuthUrl = ({ email, secret }) => {
+const generateOtpAuthUrl = ({
+  email,
+  secret,
+}) => {
   return authenticator.keyuri(
     email,
-    process.env.TOTP_ISSUER || "EmmCore Broker",
-    secret,
+    process.env.TOTP_ISSUER ||
+      "EmmCore Broker",
+    secret
   );
 };
 
@@ -37,7 +42,10 @@ const generateOtpAuthUrl = ({ email, secret }) => {
 // VERIFY TOTP
 // =========================================================
 
-const verifyTotp = (token, secret) => {
+const verifyTotp = (
+  token,
+  secret
+) => {
   return authenticator.verify({
     token,
     secret,
@@ -45,41 +53,67 @@ const verifyTotp = (token, secret) => {
 };
 
 // =========================================================
-// ENCRYPT SECRET
+// ENCRYPT TOTP SECRET
 // =========================================================
 
-const encryptTotpSecret = (secret) => {
+const encryptTotpSecret = (
+  secret
+) => {
   return encrypt(secret);
 };
 
 // =========================================================
-// DECRYPT SECRET
+// DECRYPT TOTP SECRET
 // =========================================================
 
-const decryptTotpSecret = (encrypted, iv, authTag) => {
-  return decrypt(encrypted, iv, authTag);
+const decryptTotpSecret = (
+  encrypted,
+  iv,
+  authTag
+) => {
+  return decrypt(
+    encrypted,
+    iv,
+    authTag
+  );
 };
 
 // =========================================================
-// BACKUP CODE
+// GENERATE BACKUP CODE
 // =========================================================
 
 const generateBackupCode = () => {
-  return crypto.randomBytes(8).toString("hex").toUpperCase();
+  return crypto
+    .randomBytes(8)
+    .toString("hex")
+    .toUpperCase();
 };
 
-const generateBackupCodes = (count = 10) => {
-  return Array.from({ length: count }, generateBackupCode);
+// =========================================================
+// GENERATE MULTIPLE BACKUP CODES
+// =========================================================
+
+const generateBackupCodes = (
+  count = 10
+) => {
+  return Array.from(
+    { length: count },
+    () => generateBackupCode()
+  );
 };
 
 // =========================================================
 // HASH BACKUP CODE
 // =========================================================
 
-const hashBackupCode = (code) => {
+const hashBackupCode = (
+  code
+) => {
   return crypto
     .createHash("sha256")
-    .update(code.trim().toUpperCase())
+    .update(
+      code.trim().toUpperCase()
+    )
     .digest("hex");
 };
 
