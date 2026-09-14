@@ -18,8 +18,6 @@ const {
 
 const { sendVerificationEmail } = require("../utils/email");
 const { getRefreshTokenCookieOptions } = require("../config/cookies");
-
-const { generateTotpSecret } = require("../utils/totp");
 const TwoFactorChallenge = require("./../models/TwiFactorChallengeModel");
 
 // =========================================================

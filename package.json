@@ -7,11 +7,10 @@
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "dev": "node --watch server.js",
-    "postinstall": "prisma skills sync || exit 0"
+    "dev": "node --watch server.js"
+    
   },
   "dependencies": {
-    "@prisma/client": "^7.10.0",
     "bcryptjs": "^3.0.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
@@ -22,8 +21,6 @@
     "hpp": "^0.2.3",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.9.5",
-    "otplib": "^13.5.0",
-    "prisma": "^8.0.0-rc.13",
     "qrcode": "^1.5.4",
     "resend": "^6.28.0"
   },

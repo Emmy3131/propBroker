@@ -19,13 +19,7 @@ const {
 const catchAsync = require("../utils/catchAsync");
 const TwoFactorChallenge = require("../models/TwiFactorChallengeModel");
 const { createSession } = require("../utils/sessions");
-const {
-  generateRefreshToken,
-  hashRefreshToken,
-  generateCsrfToken,
-  hashCsrfToken,
-  getRefreshTokenExpiration,
-} = require("../utils/authTokens");
+
 
 // =========================================================
 // SETUP 2FA
