@@ -28,12 +28,12 @@ app.set("query parser", "extended");
 
 
 
-app.get("/", (req, res) => {
-  res.status(200).json({
-    status: "success",
-    message: "EmmCore Global Networks API is running",
-  });
-});
+// app.get("/", (req, res) => {
+//   res.status(200).json({
+//     status: "success",
+//     message: "EmmCore Global Networks API is running",
+//   });
+// });
 
 app.use("/api/v1/auth", authRoutes);
 app.use("/api/v1/users", userRoute);
