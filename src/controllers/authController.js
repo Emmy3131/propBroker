@@ -430,238 +430,185 @@ exports.resendVerification = catchAsync(async (req, res, next) => {
 // =========================================================
 
 exports.login = catchAsync(async (req, res, next) => {
-  const { email, password } = req.body;
+  const { email, password } = req.body || {};
 
   /*
-  =====================================================
-  1. VALIDATE INPUT
-  =====================================================
-  */
+    =================================================
+    VALIDATE INPUT
+    =================================================
+    */
 
   if (!email || !password) {
-    return next(new AppError("Please provide your email and password.", 400));
+    return next(new AppError("Please provide email and password.", 400));
   }
 
   const normalizedEmail = email.trim().toLowerCase();
 
   /*
-  =====================================================
-  2. FIND USER
-  =====================================================
-
-  We explicitly select password and lockout fields
-  because they are select:false in the schema.
-  */
+    =================================================
+    FIND USER
+    =================================================
+    
+    Password is select:false in the User model,
+    so we explicitly request it.
+    */
 
   const user = await User.findOne({
     email: normalizedEmail,
   }).select("+password +failedLoginAttempts +lockUntil");
 
-  /*
-  =====================================================
-  3. USER DOES NOT EXIST
-  =====================================================
-
-  Do not reveal whether the email exists.
-  */
-
   if (!user) {
-    return next(new AppError("Invalid email or password.", 401));
+    return next(new AppError("Incorrect email or password.", 401));
   }
 
   /*
-  =====================================================
-  4. CHECK ACCOUNT LOCK
-  =====================================================
-  */
+    =================================================
+    CHECK ACCOUNT LOCK
+    =================================================
+    */
 
   if (user.isLocked()) {
-    const remainingMs = user.lockUntil.getTime() - Date.now();
-
-    const remainingMinutes = Math.ceil(remainingMs / (60 * 1000));
-
     return next(
       new AppError(
-        `Account temporarily locked. Please try again in ${remainingMinutes} minute(s).`,
+        "Your account is temporarily locked. Please try again later.",
         423,
       ),
     );
   }
 
   /*
-  =====================================================
-  5. CHECK PASSWORD
-  =====================================================
-  */
+    =================================================
+    CHECK PASSWORD
+    =================================================
+    */
 
-  const passwordCorrect = await user.comparePassword(password);
-
-  //check if 2FA is enabled and password is correct, then create a 2FA challenge
-  if (user.twoFactorEnabled) {
-    const challenge = await createTwoFactorChallenge(user, req);
-
-    return res.status(200).json({
-      status: "success",
-
-      requiresTwoFactor: true,
-
-      challenge,
-    });
-  }
-
-  /*
-  =====================================================
-  6. WRONG PASSWORD
-  =====================================================
-  */
+  const correctPassword = await user.correctPassword(password, user.password);
 
   if (!correctPassword) {
-    user.failedLoginAttempts += 1;
+    user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
 
-    const attempts = user.failedLoginAttempts;
+    /*
+        Lock account after 5 failed attempts.
+        */
 
-    await createSecurityAuditLog({
-      userId: user._id,
-      event: "LOGIN_FAILED",
-      description: "Invalid password",
-      req,
-      metadata: {
-        failedAttempts: attempts,
-      },
-    });
-
-    if (attempts >= 5) {
+    if (user.failedLoginAttempts >= 5) {
       user.lockUntil = Date.now() + 15 * 60 * 1000;
 
       user.failedLoginAttempts = 0;
-
-      await createSecurityAuditLog({
-        userId: user._id,
-        event: "ACCOUNT_LOCKED",
-        description:
-          "Account temporarily locked after repeated failed login attempts",
-        req,
-        metadata: {
-          lockDurationMinutes: 15,
-        },
-      });
     }
 
-    await user.save();
-
-    return next(new AppError("Invalid email or password", 401));
-  }
-  /*
-  =====================================================
-  7. PASSWORD IS CORRECT
-  =====================================================
-
-  Clear previous failed attempts and lock information.
-  */
-
-  user.failedLoginAttempts = 0;
-  user.lockUntil = null;
-
-  /*
-  =====================================================
-  8. EMAIL VERIFICATION
-  =====================================================
-  */
-
-  if (!user.emailVerified) {
     await user.save({
       validateBeforeSave: false,
     });
 
+    return next(new AppError("Incorrect email or password.", 401));
+  }
+
+  /*
+    =================================================
+    RESET LOGIN ATTEMPTS
+    =================================================
+    */
+
+  if (user.failedLoginAttempts || user.lockUntil) {
+    user.failedLoginAttempts = 0;
+    user.lockUntil = undefined;
+
+    await user.save({
+      validateBeforeSave: false,
+    });
+  }
+
+  /*
+    =================================================
+    EMAIL VERIFICATION
+    =================================================
+    */
+
+  if (!user.emailVerified) {
     return next(
       new AppError("Please verify your email address before logging in.", 403),
     );
   }
 
   /*
-  =====================================================
-  9. ACCOUNT STATUS
-  =====================================================
-  */
+    =================================================
+    ACCOUNT STATUS
+    =================================================
+    */
 
-  if (user.status === "blocked") {
-    await user.save({
-      validateBeforeSave: false,
-    });
-
-    return next(new AppError("Your account has been blocked.", 403));
-  }
-
-  if (user.status === "suspended") {
-    await user.save({
-      validateBeforeSave: false,
-    });
-
-    return next(new AppError("Your account has been suspended.", 403));
-  }
-
-  if (user.status === "closed") {
-    await user.save({
-      validateBeforeSave: false,
-    });
-
-    return next(new AppError("This account has been closed.", 403));
+  if (["suspended", "blocked", "closed"].includes(user.status)) {
+    return next(new AppError("Your account is not allowed to log in.", 403));
   }
 
   /*
-  =====================================================
-  10. UPDATE LOGIN INFORMATION
-  =====================================================
-  */
-
-  user.lastLoginAt = new Date();
-
-  user.lastLoginIp = req.ip || req.headers["x-forwarded-for"] || null;
-
-  user.lastActiveAt = new Date();
-
-  await user.save({
-    validateBeforeSave: false,
-  });
-
-  /*
-  =====================================================
-  11. CREATE ACCESS TOKEN
-  =====================================================
-  */
+    =================================================
+    CREATE ACCESS TOKEN
+    =================================================
+    */
 
   const accessToken = user.generateAccessToken();
 
   /*
-  =====================================================
-  12. CREATE REFRESH SESSION
-  =====================================================
+    =================================================
+    CREATE REFRESH TOKEN
+    =================================================
+    */
 
-  This also generates the session-bound CSRF token.
-  */
+  const refreshToken = generateRefreshToken();
 
-  const { refreshToken, csrfToken } = await createSession(user, req);
-
-  /*
-  =====================================================
-  13. SET REFRESH TOKEN COOKIE
-  =====================================================
-  */
-
-  res.cookie("refreshToken", refreshToken, getRefreshTokenCookieOptions());
+  const hashedRefreshToken = hashRefreshToken(refreshToken);
 
   /*
-  =====================================================
-  14. RESPONSE
-  =====================================================
-  */
+    =================================================
+    CREATE SESSION
+    =================================================
+    */
+
+  await Session.create({
+    user: user._id,
+    refreshToken: hashedRefreshToken,
+    expiresAt: getRefreshTokenExpiration(),
+  });
+
+  /*
+    =================================================
+    REFRESH TOKEN COOKIE
+    =================================================
+    */
+
+  res.cookie("refreshToken", refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  });
+
+  /*
+    =================================================
+    RESPONSE
+    =================================================
+    */
 
   res.status(200).json({
     status: "success",
+
+    message: "Login successful.",
+
     accessToken,
-    csrfToken,
+
     data: {
-      user,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        country: user.country,
+        role: user.role,
+        status: user.status,
+        emailVerified: user.emailVerified,
+        referralCode: user.referralCode,
+      },
     },
   });
 });
