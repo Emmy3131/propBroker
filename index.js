@@ -33,7 +33,7 @@ CORS
 
 const allowedOrigins = [
     "http://localhost:5173",
-    "https://prop-broker.vercel.app",
+    "https://prop-broker-front-end.vercel.app",
 ];
 
 app.use(
