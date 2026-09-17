@@ -429,14 +429,18 @@ exports.resendVerification = catchAsync(async (req, res, next) => {
 // LOGIN
 // =========================================================
 
+// =========================================================
+// LOGIN
+// =========================================================
+
 exports.login = catchAsync(async (req, res, next) => {
   const { email, password } = req.body || {};
 
   /*
-    =================================================
-    VALIDATE INPUT
-    =================================================
-    */
+  =========================================================
+  VALIDATE INPUT
+  =========================================================
+  */
 
   if (!email || !password) {
     return next(new AppError("Please provide email and password.", 400));
@@ -445,13 +449,13 @@ exports.login = catchAsync(async (req, res, next) => {
   const normalizedEmail = email.trim().toLowerCase();
 
   /*
-    =================================================
-    FIND USER
-    =================================================
-    
-    Password is select:false in the User model,
-    so we explicitly request it.
-    */
+  =========================================================
+  FIND USER
+  =========================================================
+
+  Password is select:false in UserModel,
+  so explicitly request it.
+  */
 
   const user = await User.findOne({
     email: normalizedEmail,
@@ -462,10 +466,10 @@ exports.login = catchAsync(async (req, res, next) => {
   }
 
   /*
-    =================================================
-    CHECK ACCOUNT LOCK
-    =================================================
-    */
+  =========================================================
+  CHECK ACCOUNT LOCK
+  =========================================================
+  */
 
   if (user.isLocked()) {
     return next(
@@ -477,20 +481,24 @@ exports.login = catchAsync(async (req, res, next) => {
   }
 
   /*
-    =================================================
-    CHECK PASSWORD
-    =================================================
-    */
+  =========================================================
+  CHECK PASSWORD
+  =========================================================
+  */
 
   const correctPassword = await user.comparePassword(password);
 
   if (!correctPassword) {
     user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
 
-    // Lock account after 5 failed attempts
+    /*
+    -------------------------------------------------------
+    LOCK ACCOUNT AFTER 5 FAILED ATTEMPTS
+    -------------------------------------------------------
+    */
+
     if (user.failedLoginAttempts >= 5) {
       user.lockUntil = Date.now() + 15 * 60 * 1000;
-
       user.failedLoginAttempts = 0;
     }
 
@@ -502,10 +510,10 @@ exports.login = catchAsync(async (req, res, next) => {
   }
 
   /*
-    =================================================
-    RESET LOGIN ATTEMPTS
-    =================================================
-    */
+  =========================================================
+  RESET FAILED LOGIN ATTEMPTS
+  =========================================================
+  */
 
   if (user.failedLoginAttempts || user.lockUntil) {
     user.failedLoginAttempts = 0;
@@ -517,75 +525,114 @@ exports.login = catchAsync(async (req, res, next) => {
   }
 
   /*
-    =================================================
-    EMAIL VERIFICATION
-    =================================================
-    */
+  =========================================================
+  CHECK EMAIL VERIFICATION
+  =========================================================
+  */
 
   if (!user.emailVerified) {
     return next(
-      new AppError("Please verify your email address before logging in.", 403),
+      new AppError(
+        "Please verify your email address before logging in.",
+        403,
+      ),
     );
   }
 
   /*
-    =================================================
-    ACCOUNT STATUS
-    =================================================
-    */
+  =========================================================
+  CHECK ACCOUNT STATUS
+  =========================================================
+  */
 
   if (["suspended", "blocked", "closed"].includes(user.status)) {
-    return next(new AppError("Your account is not allowed to log in.", 403));
+    return next(
+      new AppError("Your account is not allowed to log in.", 403),
+    );
   }
 
   /*
-    =================================================
-    CREATE ACCESS TOKEN
-    =================================================
-    */
+  =========================================================
+  GENERATE ACCESS TOKEN
+  =========================================================
+  */
 
   const accessToken = user.generateAccessToken();
 
   /*
-    =================================================
-    CREATE REFRESH TOKEN
-    =================================================
-    */
+  =========================================================
+  GENERATE REFRESH TOKEN
+  =========================================================
+  */
 
   const refreshToken = generateRefreshToken();
 
-  const hashedRefreshToken = hashRefreshToken(refreshToken);
+  /*
+  ---------------------------------------------------------
+  HASH REFRESH TOKEN BEFORE DATABASE STORAGE
+  ---------------------------------------------------------
+  */
+
+  const refreshTokenHash = hashRefreshToken(refreshToken);
 
   /*
-    =================================================
-    CREATE SESSION
-    =================================================
-    */
+  =========================================================
+  GENERATE CSRF TOKEN
+  =========================================================
+  */
 
-  await Session.create({
+  const csrfToken = generateCsrfToken();
+
+  /*
+  ---------------------------------------------------------
+  HASH CSRF TOKEN BEFORE DATABASE STORAGE
+  ---------------------------------------------------------
+  */
+
+  const csrfTokenHash = hashCsrfToken(csrfToken);
+
+  /*
+  =========================================================
+  CREATE SESSION
+  =========================================================
+  */
+
+  const session = await Session.create({
     user: user._id,
-    refreshToken: hashedRefreshToken,
+
+    refreshTokenHash,
+
+    csrfTokenHash,
+
     expiresAt: getRefreshTokenExpiration(),
+
+    userAgent: req.get("user-agent") || "",
+
+    ipAddress:
+      req.ip ||
+      req.headers["x-forwarded-for"] ||
+      "",
+
+    lastUsedAt: new Date(),
   });
 
   /*
-    =================================================
-    REFRESH TOKEN COOKIE
-    =================================================
-    */
+  =========================================================
+  SET REFRESH TOKEN COOKIE
+  =========================================================
+  */
 
-  res.cookie("refreshToken", refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-  });
+  res.cookie(
+    "refreshToken",
+    refreshToken,
+    getRefreshTokenCookieOptions(),
+  );
 
   /*
-    =================================================
-    RESPONSE
-    =================================================
-    */
+  =========================================================
+  RESPONSE
+  =========================================================
+  */
 
   res.status(200).json({
     status: "success",
@@ -593,6 +640,8 @@ exports.login = catchAsync(async (req, res, next) => {
     message: "Login successful.",
 
     accessToken,
+
+    csrfToken,
 
     data: {
       user: {
@@ -606,6 +655,8 @@ exports.login = catchAsync(async (req, res, next) => {
         emailVerified: user.emailVerified,
         referralCode: user.referralCode,
       },
+
+      sessionId: session._id,
     },
   });
 });
