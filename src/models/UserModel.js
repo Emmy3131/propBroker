@@ -359,7 +359,7 @@ userSchema.methods.generateAccessToken = function () {
       id: this._id,
       role: this.role,
     },
-    process.env.JWT_ACCESS_SECRET,
+    process.env.JWT_SECRET,
     {
       expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "15m",
     },
