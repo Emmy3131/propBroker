@@ -366,6 +366,25 @@ userSchema.methods.generateAccessToken = function () {
   );
 };
 
+// userSchema.methods.generateRefreshToken = function () {
+//   const secret = process.env.JWT_REFRESH_SECRET;
+
+//   if (!secret) {
+//     throw new Error("JWT_REFRESH_SECRET is not configured");
+//   }
+
+//   return jwt.sign(
+//     {
+//       id: this._id.toString(),
+//       tokenVersion: this.tokenVersion,
+//     },
+//     secret,
+//     {
+//       expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || "7d",
+//     },
+//   );
+// };
+
 // =============================================================
 // GENERATE EMAIL VERIFICATION TOKEN
 // =============================================================
