@@ -1,30 +1,71 @@
-const { Resend } = require("resend");
+const nodemailer = require("nodemailer");
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+/*
+=========================================================
+SMTP TRANSPORTER
+=========================================================
+*/
+
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASSWORD,
+  },
+});
+
+/*
+=========================================================
+VERIFY SMTP CONNECTION
+=========================================================
+*/
+
+const verifyEmailTransporter = async () => {
+  try {
+    await transporter.verify();
+
+    console.log("Email transporter is ready");
+  } catch (error) {
+    console.error("Email transporter error:", error.message);
+  }
+};
+
+/*
+=========================================================
+SEND EMAIL
+=========================================================
+*/
 
 const sendEmail = async ({ to, subject, html, text }) => {
-  const { data, error } = await resend.emails.send({
-    from: process.env.EMAIL_FROM,
-    to: [to],
-    subject,
-    html,
-    text,
-  });
+  try {
+    const info = await transporter.sendMail({
+      from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
 
-  if (error) {
-    console.error("Resend email error:", error);
+      to,
+
+      subject,
+
+      html,
+
+      text,
+    });
+
+    console.log("Email sent successfully:", info.messageId);
+
+    return info;
+  } catch (error) {
+    console.error("Nodemailer email error:", error);
 
     throw new Error(error.message || "Email could not be sent");
   }
-
-  console.log("Email sent successfully:", data.id);
-
-  return data;
 };
 
-// =========================================================
-// VERIFICATION EMAIL
-// =========================================================
+/*
+=========================================================
+VERIFICATION EMAIL
+=========================================================
+*/
 
 const sendVerificationEmail = async ({ name, email, verificationToken }) => {
   const verificationUrl = `${process.env.FRONTEND_URL}/verify-email/${verificationToken}`;
@@ -125,7 +166,12 @@ const sendVerificationEmail = async ({ name, email, verificationToken }) => {
               Please verify your email address to activate your account.
             </p>
 
-            <div style="text-align: center; margin: 35px 0;">
+            <div
+              style="
+                text-align: center;
+                margin: 35px 0;
+              "
+            >
 
               <a
                 href="${verificationUrl}"
@@ -251,4 +297,5 @@ EmmCore Broker
 module.exports = {
   sendEmail,
   sendVerificationEmail,
+  verifyEmailTransporter,
 };

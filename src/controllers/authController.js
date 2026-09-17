@@ -55,25 +55,49 @@ const createTwoFactorChallenge = async (user, req) => {
 // =========================================================
 
 exports.signup = catchAsync(async (req, res, next) => {
-  const { name, email, password, phone, country, referralCode } = req.body;
+  /*
+  =====================================================
+  GET REQUEST BODY
+  =====================================================
+  */
 
-  // -------------------------------------------------------
-  // VALIDATE REQUIRED FIELDS
-  // -------------------------------------------------------
+  const { name, email, password, phone, country, referralCode } =
+    req.body || {};
+
+  /*
+  =====================================================
+  VALIDATE REQUIRED FIELDS
+  =====================================================
+  */
 
   if (!name || !email || !password) {
     return next(new AppError("Name, email and password are required", 400));
   }
 
-  // -------------------------------------------------------
-  // NORMALIZE EMAIL
-  // -------------------------------------------------------
+  /*
+  =====================================================
+  NORMALIZE INPUT
+  =====================================================
+  */
 
+  const normalizedName = name.trim();
   const normalizedEmail = email.trim().toLowerCase();
 
-  // -------------------------------------------------------
-  // CHECK EXISTING USER
-  // -------------------------------------------------------
+  /*
+  =====================================================
+  VALIDATE PASSWORD
+  =====================================================
+  */
+
+  if (password.length < 8) {
+    return next(new AppError("Password must be at least 8 characters", 400));
+  }
+
+  /*
+  =====================================================
+  CHECK EXISTING USER
+  =====================================================
+  */
 
   const existingUser = await User.findOne({
     email: normalizedEmail,
@@ -83,41 +107,39 @@ exports.signup = catchAsync(async (req, res, next) => {
     return next(new AppError("An account with this email already exists", 409));
   }
 
-  // -------------------------------------------------------
-  // PASSWORD VALIDATION
-  // -------------------------------------------------------
-
-  if (password.length < 8) {
-    return next(new AppError("Password must be at least 8 characters", 400));
-  }
-
-  // -------------------------------------------------------
-  // GENERATE UNIQUE REFERRAL CODE
-  // -------------------------------------------------------
+  /*
+  =====================================================
+  GENERATE UNIQUE REFERRAL CODE
+  =====================================================
+  */
 
   let generatedReferralCode;
 
-  do {
-    generatedReferralCode = crypto.randomBytes(4).toString("hex").toUpperCase();
+  while (!generatedReferralCode) {
+    const candidate = crypto.randomBytes(4).toString("hex").toUpperCase();
 
     const existingCode = await User.findOne({
-      referralCode: generatedReferralCode,
+      referralCode: candidate,
     });
 
     if (!existingCode) {
-      break;
+      generatedReferralCode = candidate;
     }
-  } while (true);
+  }
 
-  // -------------------------------------------------------
-  // FIND REFERRER
-  // -------------------------------------------------------
+  /*
+  =====================================================
+  FIND REFERRER
+  =====================================================
+  */
 
   let referredBy = null;
 
   if (referralCode) {
+    const normalizedReferralCode = referralCode.trim().toUpperCase();
+
     const referrer = await User.findOne({
-      referralCode: referralCode.trim().toUpperCase(),
+      referralCode: normalizedReferralCode,
     });
 
     if (referrer) {
@@ -125,41 +147,48 @@ exports.signup = catchAsync(async (req, res, next) => {
     }
   }
 
-  // -------------------------------------------------------
-  // CREATE USER
-  // -------------------------------------------------------
+  /*
+  =====================================================
+  CREATE USER
+  =====================================================
+  */
 
   const user = new User({
-    name,
+    name: normalizedName,
     email: normalizedEmail,
     password,
+
     phone,
     country,
 
     referralCode: generatedReferralCode,
-
     referredBy,
 
     status: "pending",
-
     emailVerified: false,
   });
 
-  // -------------------------------------------------------
-  // CREATE VERIFICATION TOKEN
-  // -------------------------------------------------------
+  /*
+  =====================================================
+  CREATE EMAIL VERIFICATION TOKEN
+  =====================================================
+  */
 
   const verificationToken = user.createEmailVerificationToken();
 
-  // -------------------------------------------------------
-  // SAVE USER
-  // -------------------------------------------------------
+  /*
+  =====================================================
+  SAVE USER
+  =====================================================
+  */
 
   await user.save();
 
-  // -------------------------------------------------------
-  // SEND VERIFICATION EMAIL
-  // -------------------------------------------------------
+  /*
+  =====================================================
+  SEND VERIFICATION EMAIL
+  =====================================================
+  */
 
   try {
     await sendVerificationEmail({
@@ -170,7 +199,12 @@ exports.signup = catchAsync(async (req, res, next) => {
   } catch (error) {
     console.error("Verification email failed:", error);
 
-    // Remove token if email could not be sent
+    /*
+    -----------------------------------------------------
+    Remove unusable verification token
+    -----------------------------------------------------
+    */
+
     user.emailVerificationToken = undefined;
     user.emailVerificationExpires = undefined;
 
@@ -178,17 +212,35 @@ exports.signup = catchAsync(async (req, res, next) => {
       validateBeforeSave: false,
     });
 
-    return next(
-      new AppError(
-        "Account created, but verification email could not be sent. Please request another verification email.",
-        500,
-      ),
-    );
+    /*
+    -----------------------------------------------------
+    Account still exists.
+    Tell frontend to use resend verification.
+    -----------------------------------------------------
+    */
+
+    return res.status(201).json({
+      status: "success",
+      message:
+        "Account created, but the verification email could not be sent. Please request another verification email.",
+      data: {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          status: user.status,
+          emailVerified: user.emailVerified,
+        },
+        emailSent: false,
+      },
+    });
   }
 
-  // -------------------------------------------------------
-  // RESPONSE
-  // -------------------------------------------------------
+  /*
+  =====================================================
+  RESPONSE
+  =====================================================
+  */
 
   const response = {
     status: "success",
@@ -196,14 +248,37 @@ exports.signup = catchAsync(async (req, res, next) => {
     message: "Account created. Please verify your email address.",
 
     data: {
-      user,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        country: user.country,
+        referralCode: user.referralCode,
+        referredBy: user.referredBy,
+        status: user.status,
+        emailVerified: user.emailVerified,
+      },
+
+      emailSent: true,
     },
   };
 
-  // Development only
+  /*
+  =====================================================
+  DEVELOPMENT ONLY
+  =====================================================
+  */
+
   if (process.env.NODE_ENV === "development") {
     response.verificationToken = verificationToken;
   }
+
+  /*
+  =====================================================
+  SEND RESPONSE
+  =====================================================
+  */
 
   res.status(201).json(response);
 });

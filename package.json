@@ -8,7 +8,6 @@
   "main": "index.js",
   "scripts": {
     "dev": "node --watch server.js"
-    
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
@@ -21,8 +20,8 @@
     "hpp": "^0.2.3",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.9.5",
-    "qrcode": "^1.5.4",
-    "resend": "^6.28.0"
+    "nodemailer": "^10.0.10",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
