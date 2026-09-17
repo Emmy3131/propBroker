@@ -1,4 +1,3 @@
-
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -68,13 +67,7 @@ const userSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: [
-        "pending",
-        "active",
-        "suspended",
-        "blocked",
-        "closed",
-      ],
+      enum: ["pending", "active", "suspended", "blocked", "closed"],
       default: "pending",
       // index: true,
     },
@@ -144,31 +137,12 @@ const userSchema = new mongoose.Schema(
     },
 
     // =========================================================
-    // TWO-FACTOR AUTHENTICATION
-    // =========================================================
-
-    twoFactorEnabled: {
-      type: Boolean,
-      default: false,
-    },
-
-    twoFactorSecret: {
-      type: String,
-      select: false,
-    },
-
-    // =========================================================
     // KYC
     // =========================================================
 
     kycStatus: {
       type: String,
-      enum: [
-        "not_submitted",
-        "pending",
-        "verified",
-        "rejected",
-      ],
+      enum: ["not_submitted", "pending", "verified", "rejected"],
       default: "not_submitted",
       // index: true,
     },
@@ -248,53 +222,52 @@ const userSchema = new mongoose.Schema(
       default: null,
     },
 
-
     // =========================================================
-// TWO-FACTOR AUTHENTICATION
-// =========================================================
+    // TWO-FACTOR AUTHENTICATION
+    // =========================================================
 
-twoFactorEnabled: {
-  type: Boolean,
-  default: false,
-  index: true,
-},
+    twoFactorEnabled: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
 
-twoFactorSecret: {
-  type: String,
-  select: false,
-},
+    twoFactorSecret: {
+      type: String,
+      select: false,
+    },
 
-twoFactorSecretIV: {
-  type: String,
-  select: false,
-},
+    twoFactorSecretIV: {
+      type: String,
+      select: false,
+    },
 
-twoFactorSecretAuthTag: {
-  type: String,
-  select: false,
-},
+    twoFactorSecretAuthTag: {
+      type: String,
+      select: false,
+    },
 
-twoFactorBackupCodes: {
-  type: [String],
-  select: false,
-  default: [],
-},
+    twoFactorBackupCodes: {
+      type: [String],
+      select: false,
+      default: [],
+    },
 
-twoFactorEnabledAt: {
-  type: Date,
-  default: null,
-},
+    twoFactorEnabledAt: {
+      type: Date,
+      default: null,
+    },
 
-twoFactorLastUsedAt: {
-  type: Date,
-  default: null,
-},
-},
+    twoFactorLastUsedAt: {
+      type: Date,
+      default: null,
+    },
+  },
 
   {
     timestamps: true,
     versionKey: false,
-  }
+  },
 );
 
 // =============================================================
@@ -313,7 +286,6 @@ userSchema.index({
 userSchema.index({
   kycStatus: 1,
 });
-
 
 // =============================================================
 // HASH PASSWORD
@@ -334,7 +306,6 @@ userSchema.pre("save", async function () {
   // next();
 });
 
-
 // =============================================================
 // UPDATE PASSWORD CHANGED DATE
 // =============================================================
@@ -345,30 +316,21 @@ userSchema.pre("save", function () {
   this.passwordChangedAt = Date.now() - 1000;
 });
 
-
 // =============================================================
 // COMPARE PASSWORD
 // =============================================================
 
 userSchema.methods.comparePassword = async function (candidatePassword) {
-  return await bcrypt.compare(
-    candidatePassword,
-    this.password
-  );
+  return await bcrypt.compare(candidatePassword, this.password);
 };
-
 
 // =============================================================
 // CHECK IF ACCOUNT IS LOCKED
 // =============================================================
 
 userSchema.methods.isLocked = function () {
-  return Boolean(
-    this.lockUntil &&
-    this.lockUntil.getTime() > Date.now()
-  );
+  return Boolean(this.lockUntil && this.lockUntil.getTime() > Date.now());
 };
-
 
 // =============================================================
 // CHECK PASSWORD CHANGE AFTER JWT WAS ISSUED
@@ -381,12 +343,11 @@ userSchema.methods.changedPasswordAfter = function (jwtTimestamp) {
 
   const changedTimestamp = parseInt(
     this.passwordChangedAt.getTime() / 1000,
-    10
+    10,
   );
 
   return jwtTimestamp < changedTimestamp;
 };
-
 
 // =============================================================
 // GENERATE JWT
@@ -401,10 +362,9 @@ userSchema.methods.generateAccessToken = function () {
     process.env.JWT_ACCESS_SECRET,
     {
       expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "15m",
-    }
+    },
   );
 };
-
 
 // =============================================================
 // GENERATE EMAIL VERIFICATION TOKEN
@@ -418,12 +378,10 @@ userSchema.methods.createEmailVerificationToken = function () {
     .update(rawToken)
     .digest("hex");
 
-  this.emailVerificationExpires =
-    Date.now() + 10 * 60 * 1000;
+  this.emailVerificationExpires = Date.now() + 10 * 60 * 1000;
 
   return rawToken;
 };
-
 
 // =============================================================
 // GENERATE PASSWORD RESET TOKEN
@@ -437,12 +395,10 @@ userSchema.methods.createPasswordResetToken = function () {
     .update(resetToken)
     .digest("hex");
 
-  this.passwordResetExpires =
-    Date.now() + 10 * 60 * 1000;
+  this.passwordResetExpires = Date.now() + 10 * 60 * 1000;
 
   return resetToken;
 };
-
 
 // =============================================================
 // REMOVE SENSITIVE DATA
@@ -461,9 +417,11 @@ userSchema.methods.toJSON = function () {
   delete user.lockUntil;
   delete user.lastLoginIp;
   delete user.twoFactorSecret;
+  delete user.twoFactorSecretIV;
+  delete user.twoFactorSecretAuthTag;
+  delete user.twoFactorBackupCodes;
 
   return user;
 };
-
 
 module.exports = mongoose.model("User", userSchema);

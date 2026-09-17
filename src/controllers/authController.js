@@ -482,15 +482,12 @@ exports.login = catchAsync(async (req, res, next) => {
     =================================================
     */
 
-  const correctPassword = await user.correctPassword(password, user.password);
+  const correctPassword = await user.comparePassword(password);
 
   if (!correctPassword) {
     user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
 
-    /*
-        Lock account after 5 failed attempts.
-        */
-
+    // Lock account after 5 failed attempts
     if (user.failedLoginAttempts >= 5) {
       user.lockUntil = Date.now() + 15 * 60 * 1000;
 
