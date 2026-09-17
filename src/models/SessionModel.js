@@ -2,9 +2,11 @@ const mongoose = require("mongoose");
 
 const sessionSchema = new mongoose.Schema(
   {
-    // =====================================================
-    // USER
-    // =====================================================
+    /*
+    =====================================================
+    USER
+    =====================================================
+    */
 
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -13,9 +15,11 @@ const sessionSchema = new mongoose.Schema(
       index: true,
     },
 
-    // =====================================================
-    // REFRESH TOKEN HASH
-    // =====================================================
+    /*
+    =====================================================
+    REFRESH TOKEN HASH
+    =====================================================
+    */
 
     refreshTokenHash: {
       type: String,
@@ -23,9 +27,11 @@ const sessionSchema = new mongoose.Schema(
       select: false,
     },
 
-    // =====================================================
-    // CSRF TOKEN HASH
-    // =====================================================
+    /*
+    =====================================================
+    CSRF TOKEN HASH
+    =====================================================
+    */
 
     csrfTokenHash: {
       type: String,
@@ -33,19 +39,22 @@ const sessionSchema = new mongoose.Schema(
       select: false,
     },
 
-    // =====================================================
-    // SESSION EXPIRATION
-    // =====================================================
+    /*
+    =====================================================
+    SESSION EXPIRATION
+    =====================================================
+    */
 
     expiresAt: {
       type: Date,
       required: true,
-      index: true,
     },
 
-    // =====================================================
-    // SESSION REVOCATION
-    // =====================================================
+    /*
+    =====================================================
+    REVOCATION
+    =====================================================
+    */
 
     revoked: {
       type: Boolean,
@@ -58,9 +67,11 @@ const sessionSchema = new mongoose.Schema(
       default: null,
     },
 
-    // =====================================================
-    // SESSION METADATA
-    // =====================================================
+    /*
+    =====================================================
+    DEVICE INFORMATION
+    =====================================================
+    */
 
     userAgent: {
       type: String,
@@ -72,6 +83,12 @@ const sessionSchema = new mongoose.Schema(
       default: null,
     },
 
+    /*
+    =====================================================
+    SESSION ACTIVITY
+    =====================================================
+    */
+
     lastUsedAt: {
       type: Date,
       default: Date.now,
@@ -79,27 +96,26 @@ const sessionSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-  },
+  }
 );
 
-// =========================================================
-// TTL INDEX
-// Automatically deletes sessions after expiresAt
-// =========================================================
+/*
+=====================================================
+TTL INDEX
 
-sessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+MongoDB automatically removes the session when
+expiresAt is reached.
 
-// =========================================================
-// ACTIVE SESSION INDEX
-// =========================================================
+expireAfterSeconds: 0 means:
+delete when expiresAt <= current time.
+=====================================================
+*/
 
-sessionSchema.index({
-  user: 1,
-  revoked: 1,
-});
-
-// =========================================================
-// MODEL
-// =========================================================
+sessionSchema.index(
+  { expiresAt: 1 },
+  {
+    expireAfterSeconds: 0,
+  }
+);
 
 module.exports = mongoose.model("Session", sessionSchema);
