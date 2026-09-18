@@ -182,7 +182,7 @@ exports.signup = catchAsync(async (req, res, next) => {
   // -------------------------------------------------------
 
   await user.save();
-  await createWalletForUser(user.id, USD)
+  await createWalletForUser(user.id)
 
   // -------------------------------------------------------
   // SEND VERIFICATION EMAIL
