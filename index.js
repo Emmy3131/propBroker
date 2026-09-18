@@ -10,6 +10,7 @@ const AppError = require("./src/utils/appError");
 
 const userRoute = require("./src/routes/userRoutes");
 const authRoutes = require("./src/routes/authRoutes");
+const kycRoutes = require("./src/routes/kycRoutes")
 
 const app = express();
 
@@ -142,6 +143,13 @@ USER ROUTES
 */
 
 app.use("/api/v1/users", userRoute);
+
+/*
+=====================================================
+KYC ROUTES
+=====================================================
+*/
+app.use("/api/v1/kyc", kycRoutes)
 
 /*
 =====================================================
