@@ -10,7 +10,8 @@ const AppError = require("./src/utils/appError");
 
 const userRoute = require("./src/routes/userRoutes");
 const authRoutes = require("./src/routes/authRoutes");
-const kycRoutes = require("./src/routes/kycRoutes")
+const kycRoutes = require("./src/routes/kycRoutes");
+const walletRoute = require("./src/routes/walletRoutes");
 
 const app = express();
 
@@ -150,6 +151,13 @@ KYC ROUTES
 =====================================================
 */
 app.use("/api/v1/kyc", kycRoutes)
+
+
+
+
+//others routes
+
+app.use("/api/v1/wallet", walletRoute)
 
 /*
 =====================================================

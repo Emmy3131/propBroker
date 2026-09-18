@@ -20,13 +20,7 @@ const kycSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: [
-        "not_started",
-        "pending",
-        "under_review",
-        "verified",
-        "rejected",
-      ],
+      enum: ["not_started", "pending", "under_review", "verified", "rejected"],
       default: "not_started",
       index: true,
     },
@@ -87,12 +81,7 @@ const kycSchema = new mongoose.Schema(
 
     identityDocumentType: {
       type: String,
-      enum: [
-        "passport",
-        "national_id",
-        "drivers_license",
-        "voters_card",
-      ],
+      enum: ["passport", "national_id", "drivers_license", "voters_card"],
     },
 
     identityDocumentNumber: {
@@ -109,29 +98,9 @@ const kycSchema = new mongoose.Schema(
     // Store secure storage references instead.
     //
 
-    documentFront: {
-      storageKey: {
-        type: String,
-        default: null,
-      },
+    documentFront: { storageKey: { type: String, default: null } },
 
-      url: {
-        type: String,
-        default: null,
-      },
-    },
-
-    documentBack: {
-      storageKey: {
-        type: String,
-        default: null,
-      },
-
-      url: {
-        type: String,
-        default: null,
-      },
-    },
+    documentFront: { storageKey: { type: String, default: null } },
 
     selfie: {
       storageKey: {
@@ -195,7 +164,7 @@ const kycSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-  }
+  },
 );
 
 // =========================================================

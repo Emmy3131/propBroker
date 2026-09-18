@@ -14,7 +14,7 @@ GET /api/v1/kyc/me
 exports.getMyKyc = catchAsync(async (req, res, next) => {
   const kyc = await KYC.findOne({
     user: req.user._id,
-  });
+  }).select("-documentFront -documentBack -selfie -identityDocumentNumber");
 
   if (!kyc) {
     return res.status(200).json({
@@ -454,8 +454,6 @@ exports.rejectKyc = catchAsync(async (req, res, next) => {
     },
   });
 });
-
-
 
 /*
 =====================================================

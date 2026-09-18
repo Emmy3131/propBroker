@@ -33,6 +33,11 @@ const securityAuditLogSchema = new mongoose.Schema(
         "LOGOUT_ALL",
 
         "SUSPICIOUS_LOGIN",
+
+        "KYC_SUBMITTED", 
+        "KYC_APPROVED", 
+        "KYC_REJECTED", 
+        "KYC_DOCUMENT_ACCESSED"
       ],
       index: true,
     },

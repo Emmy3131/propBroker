@@ -2,6 +2,7 @@ const express = require("express");
 
 const kycController = require("./../controllers/kycControllers");
 const { protect, restrictTo } = require("./../middlewares/authMiddlewares");
+const kycDocumentController = require("./../controllers/kycDocumentsController");
 
 const router = express.Router();
 
@@ -45,5 +46,11 @@ router.patch(
 );
 
 router.patch("/admin/:id/reject", restrictTo("admin"), kycController.rejectKyc);
+
+router.get(
+  "/admin/:id/document/:documentType",
+  restrictTo("admin"),
+  kycDocumentController.getKycDocument,
+);
 
 module.exports = router;

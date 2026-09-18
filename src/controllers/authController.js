@@ -23,6 +23,7 @@ const {
 } = require("../config/cookies");
 
 const TwoFactorChallenge = require("../models/TwiFactorChallengeModel");
+const {createWalletForUser,} = require("./../services/walletServices");
 
 // =========================================================
 // TWO-FACTOR HELPER
@@ -181,6 +182,7 @@ exports.signup = catchAsync(async (req, res, next) => {
   // -------------------------------------------------------
 
   await user.save();
+  await createWalletForUser(user.id, USD)
 
   // -------------------------------------------------------
   // SEND VERIFICATION EMAIL
