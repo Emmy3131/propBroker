@@ -2,12 +2,25 @@ const mongoose = require("mongoose");
 
 const walletSchema = new mongoose.Schema(
   {
+    /*
+    =================================================
+    OWNER
+    =================================================
+    */
+
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
       unique: true,
     },
+
+    /*
+    =================================================
+    CURRENCY
+    =================================================
+    */
+
     currency: {
       type: String,
       enum: ["USD", "NGN", "CAD", "EUR"],
@@ -15,21 +28,62 @@ const walletSchema = new mongoose.Schema(
       uppercase: true,
       trim: true,
     },
-    /* * Money currently available for use. */ availableBalance: {
+
+    /*
+    =================================================
+    AVAILABLE BALANCE
+    =================================================
+    */
+
+    availableBalance: {
       type: mongoose.Schema.Types.Decimal128,
       default: 0,
     },
-    /* * Money temporarily reserved. * * Examples: * - pending withdrawal * - reserved trading funds * - other financial holds */ lockedBalance:
-      { type: mongoose.Schema.Types.Decimal128, default: 0 },
+
+    /*
+    =================================================
+    LOCKED BALANCE
+    =================================================
+
+    Examples:
+
+    - Pending withdrawal
+    - Reserved trading funds
+    - Financial holds
+    */
+
+    lockedBalance: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: 0,
+    },
+
+    /*
+    =================================================
+    WALLET STATUS
+    =================================================
+    */
+
     status: {
       type: String,
       enum: ["active", "frozen", "closed"],
       default: "active",
       index: true,
     },
-    lastTransactionAt: { type: Date, default: null },
+
+    /*
+    =================================================
+    LAST TRANSACTION
+    =================================================
+    */
+
+    lastTransactionAt: {
+      type: Date,
+      default: null,
+    },
   },
-  { timestamps: true },
+  {
+    timestamps: true,
+  }
 );
-walletSchema.index({ user: 1, status: 1 });
+
 module.exports = mongoose.model("Wallet", walletSchema);

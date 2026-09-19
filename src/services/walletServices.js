@@ -1,29 +1,19 @@
 const mongoose = require("mongoose");
 
-const Wallet = require("../models/WalletModel");
-const LedgerEntry = require("../models/LedgerEntryModel");
-const AppError = require("../utils/appError");
+const Wallet = require("./../models/WalletModel");
+const LedgerEntry = require("./../models/LedgerEntryModel");
+const AppError = require("./../utils/appError");
 
 /*
 =====================================================
-CONVERT VALUE TO DECIMAL128
+DECIMAL128 HELPERS
 =====================================================
 */
+
 const decimal = (value) => {
   return mongoose.Types.Decimal128.fromString(String(value));
 };
 
-/*
-=====================================================
-CONVERT DECIMAL128 TO NUMBER
-=====================================================
-
-Use this only when returning values to the client.
-
-Internal financial calculations should preferably
-remain Decimal128/string based.
-=====================================================
-*/
 const decimalToString = (value) => {
   if (value === undefined || value === null) {
     return "0";
@@ -37,28 +27,36 @@ const decimalToString = (value) => {
 VALIDATE MONEY AMOUNT
 =====================================================
 */
+
 const validateAmount = (amount) => {
-  const value = Number(amount);
+  if (amount === undefined || amount === null || amount === "") {
+    throw new AppError("Amount is required.", 400);
+  }
+
+  const amountString = String(amount).trim();
+
+  if (!/^\d+(\.\d+)?$/.test(amountString)) {
+    throw new AppError("Invalid monetary amount.", 400);
+  }
+
+  const value = Number(amountString);
 
   if (!Number.isFinite(value) || value <= 0) {
     throw new AppError("Amount must be greater than zero.", 400);
   }
 
-  /*
-   * Prevent excessive decimal precision.
-   */
-  const decimalPlaces = String(amount).includes(".")
-    ? String(amount).split(".")[1].length
+  const decimalPlaces = amountString.includes(".")
+    ? amountString.split(".")[1].length
     : 0;
 
   if (decimalPlaces > 8) {
     throw new AppError(
       "Amount cannot contain more than 8 decimal places.",
-      400,
+      400
     );
   }
 
-  return String(amount);
+  return amountString;
 };
 
 /*
@@ -66,7 +64,29 @@ const validateAmount = (amount) => {
 CREATE WALLET
 =====================================================
 */
+
 const createWalletForUser = async (userId, currency = "USD") => {
+  if (!userId) {
+    throw new AppError("User ID is required to create a wallet.", 400);
+  }
+
+  const normalizedCurrency = String(currency).toUpperCase();
+
+  const allowedCurrencies = ["USD", "NGN", "CAD", "EUR"];
+
+  if (!allowedCurrencies.includes(normalizedCurrency)) {
+    throw new AppError(
+      `Unsupported wallet currency: ${normalizedCurrency}`,
+      400
+    );
+  }
+
+  /*
+  ---------------------------------------------------
+  Check whether the user already has a wallet.
+  ---------------------------------------------------
+  */
+
   const existingWallet = await Wallet.findOne({
     user: userId,
   });
@@ -75,12 +95,21 @@ const createWalletForUser = async (userId, currency = "USD") => {
     return existingWallet;
   }
 
-  return Wallet.create({
+  /*
+  ---------------------------------------------------
+  Create a new wallet.
+  ---------------------------------------------------
+  */
+
+  const wallet = await Wallet.create({
     user: userId,
-    currency,
+    currency: normalizedCurrency,
     availableBalance: decimal("0"),
     lockedBalance: decimal("0"),
+    status: "active",
   });
+
+  return wallet;
 };
 
 /*
@@ -88,7 +117,12 @@ const createWalletForUser = async (userId, currency = "USD") => {
 GET WALLET
 =====================================================
 */
+
 const getWalletForUser = async (userId) => {
+  if (!userId) {
+    throw new AppError("User ID is required.", 400);
+  }
+
   return Wallet.findOne({
     user: userId,
   });
@@ -108,6 +142,7 @@ TRANSFER
 etc.
 =====================================================
 */
+
 const creditWallet = async ({
   userId,
   amount,
@@ -117,6 +152,10 @@ const creditWallet = async ({
   metadata = {},
 }) => {
   const validatedAmount = validateAmount(amount);
+
+  if (!type) {
+    throw new AppError("Ledger transaction type is required.", 400);
+  }
 
   const session = await mongoose.startSession();
 
@@ -133,19 +172,30 @@ const creditWallet = async ({
         throw new AppError("Active wallet not found.", 404);
       }
 
-      const currentBalance = decimalToString(wallet.availableBalance);
+      const currentBalance = decimalToString(
+        wallet.availableBalance
+      );
+
+      /*
+      -------------------------------------------------
+      NOTE:
+      This arithmetic is still Number-based.
+      Replace with exact decimal arithmetic before
+      processing real money.
+      -------------------------------------------------
+      */
 
       const newBalance = decimal(
-        (Number(currentBalance) + Number(validatedAmount)).toFixed(8),
+        (
+          Number(currentBalance) +
+          Number(validatedAmount)
+        ).toFixed(8)
       );
 
       wallet.availableBalance = newBalance;
-
       wallet.lastTransactionAt = new Date();
 
-      await wallet.save({
-        session,
-      });
+      await wallet.save({ session });
 
       const [ledgerEntry] = await LedgerEntry.create(
         [
@@ -162,7 +212,7 @@ const creditWallet = async ({
             metadata,
           },
         ],
-        { session },
+        { session }
       );
 
       result = {
@@ -191,6 +241,7 @@ TRANSFER
 etc.
 =====================================================
 */
+
 const debitWallet = async ({
   userId,
   amount,
@@ -201,19 +252,16 @@ const debitWallet = async ({
 }) => {
   const validatedAmount = validateAmount(amount);
 
+  if (!type) {
+    throw new AppError("Ledger transaction type is required.", 400);
+  }
+
   const session = await mongoose.startSession();
 
   try {
     let result;
 
     await session.withTransaction(async () => {
-      /*
-       * IMPORTANT:
-       *
-       * The wallet is read inside the transaction.
-       * We then check the available balance before
-       * performing the debit.
-       */
       const wallet = await Wallet.findOne({
         user: userId,
         status: "active",
@@ -223,23 +271,27 @@ const debitWallet = async ({
         throw new AppError("Active wallet not found.", 404);
       }
 
-      const currentBalance = Number(decimalToString(wallet.availableBalance));
+      const currentBalance = Number(
+        decimalToString(wallet.availableBalance)
+      );
 
       const debitAmount = Number(validatedAmount);
 
       if (currentBalance < debitAmount) {
-        throw new AppError("Insufficient available wallet balance.", 400);
+        throw new AppError(
+          "Insufficient available wallet balance.",
+          400
+        );
       }
 
-      const newBalance = decimal((currentBalance - debitAmount).toFixed(8));
+      const newBalance = decimal(
+        (currentBalance - debitAmount).toFixed(8)
+      );
 
       wallet.availableBalance = newBalance;
-
       wallet.lastTransactionAt = new Date();
 
-      await wallet.save({
-        session,
-      });
+      await wallet.save({ session });
 
       const [ledgerEntry] = await LedgerEntry.create(
         [
@@ -256,7 +308,7 @@ const debitWallet = async ({
             metadata,
           },
         ],
-        { session },
+        { session }
       );
 
       result = {
@@ -270,6 +322,12 @@ const debitWallet = async ({
     await session.endSession();
   }
 };
+
+/*
+=====================================================
+EXPORTS
+=====================================================
+*/
 
 module.exports = {
   createWalletForUser,
