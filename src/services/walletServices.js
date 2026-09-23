@@ -1,19 +1,48 @@
 const mongoose = require("mongoose");
+const Decimal = require("decimal.js");
 
-const Wallet = require("./../models/WalletModel");
-const LedgerEntry = require("./../models/LedgerEntryModel");
-const AppError = require("./../utils/appError");
+const Wallet = require("../models/WalletModel");
+const LedgerEntry = require("../models/LedgerEntryModel");
+const AppError = require("../utils/appError");
 
 /*
 =====================================================
-DECIMAL128 HELPERS
+DECIMAL HELPERS
 =====================================================
 */
 
-const decimal = (value) => {
-  return mongoose.Types.Decimal128.fromString(String(value));
+/**
+ * Convert any valid money value to Decimal.
+ */
+const toDecimal = (value) => {
+  try {
+    return new Decimal(String(value));
+  } catch (error) {
+    throw new AppError("Invalid monetary value.", 400);
+  }
 };
 
+/**
+ * Convert Decimal to MongoDB Decimal128.
+ */
+const toDecimal128 = (value) => {
+  return mongoose.Types.Decimal128.fromString(toDecimal(value).toFixed(8));
+};
+
+/**
+ * Convert MongoDB Decimal128 to Decimal.js.
+ */
+const fromDecimal128 = (value) => {
+  if (value === undefined || value === null) {
+    return new Decimal(0);
+  }
+
+  return new Decimal(value.toString());
+};
+
+/**
+ * Convert Decimal128 to string for API responses.
+ */
 const decimalToString = (value) => {
   if (value === undefined || value === null) {
     return "0";
@@ -24,7 +53,7 @@ const decimalToString = (value) => {
 
 /*
 =====================================================
-VALIDATE MONEY AMOUNT
+VALIDATE MONEY
 =====================================================
 */
 
@@ -33,30 +62,122 @@ const validateAmount = (amount) => {
     throw new AppError("Amount is required.", 400);
   }
 
-  const amountString = String(amount).trim();
+  const value = String(amount).trim();
 
-  if (!/^\d+(\.\d+)?$/.test(amountString)) {
+  /*
+  Only positive decimal numbers.
+
+  Allowed:
+  10
+  10.50
+  0.25
+
+  Rejected:
+  -10
+  abc
+  10.123456789
+  */
+
+  if (!/^\d+(\.\d+)?$/.test(value)) {
     throw new AppError("Invalid monetary amount.", 400);
   }
 
-  const value = Number(amountString);
-
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new AppError("Amount must be greater than zero.", 400);
-  }
-
-  const decimalPlaces = amountString.includes(".")
-    ? amountString.split(".")[1].length
-    : 0;
+  const decimalPlaces = value.includes(".") ? value.split(".")[1].length : 0;
 
   if (decimalPlaces > 8) {
     throw new AppError(
       "Amount cannot contain more than 8 decimal places.",
-      400
+      400,
     );
   }
 
-  return amountString;
+  const decimalValue = new Decimal(value);
+
+  if (!decimalValue.isFinite() || decimalValue.lte(0)) {
+    throw new AppError("Amount must be greater than zero.", 400);
+  }
+
+  return decimalValue;
+};
+
+/*
+=====================================================
+VALIDATE LEDGER TYPE
+=====================================================
+*/
+
+const allowedLedgerTypes = [
+  "DEPOSIT",
+  "WITHDRAWAL",
+  "TRADE",
+  "FEE",
+  "REFUND",
+  "BONUS",
+  "ADJUSTMENT",
+  "TRANSFER",
+];
+
+const validateLedgerType = (type) => {
+  if (!type) {
+    throw new AppError("Ledger transaction type is required.", 400);
+  }
+
+  const normalizedType = String(type).toUpperCase();
+
+  if (!allowedLedgerTypes.includes(normalizedType)) {
+    throw new AppError(
+      `Invalid ledger transaction type: ${normalizedType}`,
+      400,
+    );
+  }
+
+  return normalizedType;
+};
+
+/*
+=====================================================
+LOAD ACTIVE WALLET
+=====================================================
+*/
+
+const getActiveWallet = async (userId, session) => {
+  if (!userId) {
+    throw new AppError("User ID is required.", 400);
+  }
+
+  const wallet = await Wallet.findOne({
+    user: userId,
+  }).session(session);
+
+  if (!wallet) {
+    throw new AppError("Wallet not found.", 404);
+  }
+
+  /*
+  ---------------------------------------------------
+  FROZEN WALLET
+  ---------------------------------------------------
+  */
+
+  if (wallet.status === "frozen") {
+    throw new AppError("Your wallet is currently frozen.", 403);
+  }
+
+  /*
+  ---------------------------------------------------
+  CLOSED WALLET
+  ---------------------------------------------------
+  */
+
+  if (wallet.status === "closed") {
+    throw new AppError("Your wallet is closed.", 403);
+  }
+
+  if (wallet.status !== "active") {
+    throw new AppError("Wallet is not active.", 403);
+  }
+
+  return wallet;
 };
 
 /*
@@ -77,15 +198,9 @@ const createWalletForUser = async (userId, currency = "USD") => {
   if (!allowedCurrencies.includes(normalizedCurrency)) {
     throw new AppError(
       `Unsupported wallet currency: ${normalizedCurrency}`,
-      400
+      400,
     );
   }
-
-  /*
-  ---------------------------------------------------
-  Check whether the user already has a wallet.
-  ---------------------------------------------------
-  */
 
   const existingWallet = await Wallet.findOne({
     user: userId,
@@ -95,21 +210,13 @@ const createWalletForUser = async (userId, currency = "USD") => {
     return existingWallet;
   }
 
-  /*
-  ---------------------------------------------------
-  Create a new wallet.
-  ---------------------------------------------------
-  */
-
-  const wallet = await Wallet.create({
+  return Wallet.create({
     user: userId,
     currency: normalizedCurrency,
-    availableBalance: decimal("0"),
-    lockedBalance: decimal("0"),
+    availableBalance: toDecimal128("0"),
+    lockedBalance: toDecimal128("0"),
     status: "active",
   });
-
-  return wallet;
 };
 
 /*
@@ -130,16 +237,56 @@ const getWalletForUser = async (userId) => {
 
 /*
 =====================================================
+CREATE LEDGER ENTRY
+=====================================================
+*/
+
+const createLedgerEntry = async ({
+  wallet,
+  userId,
+  type,
+  direction,
+  amount,
+  balanceAfter,
+  reference = null,
+  description = null,
+  metadata = {},
+  session,
+}) => {
+  const [entry] = await LedgerEntry.create(
+    [
+      {
+        wallet: wallet._id,
+        user: userId,
+        type,
+        direction,
+        amount: toDecimal128(amount),
+        currency: wallet.currency,
+        balanceAfter: toDecimal128(balanceAfter),
+        reference,
+        description,
+        metadata,
+      },
+    ],
+    {
+      session,
+    },
+  );
+
+  return entry;
+};
+
+/*
+=====================================================
 CREDIT WALLET
 =====================================================
 
-Used for:
+Examples:
 
 DEPOSIT
 BONUS
 REFUND
 TRANSFER
-etc.
 =====================================================
 */
 
@@ -153,9 +300,7 @@ const creditWallet = async ({
 }) => {
   const validatedAmount = validateAmount(amount);
 
-  if (!type) {
-    throw new AppError("Ledger transaction type is required.", 400);
-  }
+  const ledgerType = validateLedgerType(type);
 
   const session = await mongoose.startSession();
 
@@ -163,57 +308,32 @@ const creditWallet = async ({
     let result;
 
     await session.withTransaction(async () => {
-      const wallet = await Wallet.findOne({
-        user: userId,
-        status: "active",
-      }).session(session);
+      const wallet = await getActiveWallet(userId, session);
 
-      if (!wallet) {
-        throw new AppError("Active wallet not found.", 404);
-      }
+      const currentBalance = fromDecimal128(wallet.availableBalance);
 
-      const currentBalance = decimalToString(
-        wallet.availableBalance
-      );
+      const newBalance = currentBalance.plus(validatedAmount);
 
-      /*
-      -------------------------------------------------
-      NOTE:
-      This arithmetic is still Number-based.
-      Replace with exact decimal arithmetic before
-      processing real money.
-      -------------------------------------------------
-      */
+      wallet.availableBalance = toDecimal128(newBalance);
 
-      const newBalance = decimal(
-        (
-          Number(currentBalance) +
-          Number(validatedAmount)
-        ).toFixed(8)
-      );
-
-      wallet.availableBalance = newBalance;
       wallet.lastTransactionAt = new Date();
 
-      await wallet.save({ session });
+      await wallet.save({
+        session,
+      });
 
-      const [ledgerEntry] = await LedgerEntry.create(
-        [
-          {
-            wallet: wallet._id,
-            user: userId,
-            type,
-            direction: "CREDIT",
-            amount: decimal(validatedAmount),
-            currency: wallet.currency,
-            balanceAfter: newBalance,
-            reference,
-            description,
-            metadata,
-          },
-        ],
-        { session }
-      );
+      const ledgerEntry = await createLedgerEntry({
+        wallet,
+        userId,
+        type: ledgerType,
+        direction: "CREDIT",
+        amount: validatedAmount,
+        balanceAfter: newBalance,
+        reference,
+        description,
+        metadata,
+        session,
+      });
 
       result = {
         wallet,
@@ -232,13 +352,12 @@ const creditWallet = async ({
 DEBIT WALLET
 =====================================================
 
-Used for:
+Examples:
 
 WITHDRAWAL
 TRADE
 FEE
 TRANSFER
-etc.
 =====================================================
 */
 
@@ -252,9 +371,7 @@ const debitWallet = async ({
 }) => {
   const validatedAmount = validateAmount(amount);
 
-  if (!type) {
-    throw new AppError("Ledger transaction type is required.", 400);
-  }
+  const ledgerType = validateLedgerType(type);
 
   const session = await mongoose.startSession();
 
@@ -262,54 +379,291 @@ const debitWallet = async ({
     let result;
 
     await session.withTransaction(async () => {
-      const wallet = await Wallet.findOne({
-        user: userId,
-        status: "active",
-      }).session(session);
+      const wallet = await getActiveWallet(userId, session);
 
-      if (!wallet) {
-        throw new AppError("Active wallet not found.", 404);
+      const currentBalance = fromDecimal128(wallet.availableBalance);
+
+      if (currentBalance.lt(validatedAmount)) {
+        throw new AppError("Insufficient available wallet balance.", 400);
       }
 
-      const currentBalance = Number(
-        decimalToString(wallet.availableBalance)
-      );
+      const newBalance = currentBalance.minus(validatedAmount);
 
-      const debitAmount = Number(validatedAmount);
+      wallet.availableBalance = toDecimal128(newBalance);
 
-      if (currentBalance < debitAmount) {
-        throw new AppError(
-          "Insufficient available wallet balance.",
-          400
-        );
-      }
-
-      const newBalance = decimal(
-        (currentBalance - debitAmount).toFixed(8)
-      );
-
-      wallet.availableBalance = newBalance;
       wallet.lastTransactionAt = new Date();
 
-      await wallet.save({ session });
+      await wallet.save({
+        session,
+      });
 
-      const [ledgerEntry] = await LedgerEntry.create(
-        [
-          {
-            wallet: wallet._id,
-            user: userId,
-            type,
-            direction: "DEBIT",
-            amount: decimal(validatedAmount),
-            currency: wallet.currency,
-            balanceAfter: newBalance,
-            reference,
-            description,
-            metadata,
-          },
-        ],
-        { session }
-      );
+      const ledgerEntry = await createLedgerEntry({
+        wallet,
+        userId,
+        type: ledgerType,
+        direction: "DEBIT",
+        amount: validatedAmount,
+        balanceAfter: newBalance,
+        reference,
+        description,
+        metadata,
+        session,
+      });
+
+      result = {
+        wallet,
+        ledgerEntry,
+      };
+    });
+
+    return result;
+  } finally {
+    await session.endSession();
+  }
+};
+
+/*
+=====================================================
+RESERVE WALLET FUNDS
+=====================================================
+
+Moves money:
+
+AVAILABLE
+   ↓
+LOCKED
+
+Examples:
+
+- Pending withdrawal
+- Trading order margin
+- Other financial reservation
+=====================================================
+*/
+
+const reserveWalletFunds = async ({
+  userId,
+  amount,
+  type = "TRADE",
+  reference = null,
+  description = null,
+  metadata = {},
+}) => {
+  const validatedAmount = validateAmount(amount);
+
+  const ledgerType = validateLedgerType(type);
+
+  const session = await mongoose.startSession();
+
+  try {
+    let result;
+
+    await session.withTransaction(async () => {
+      const wallet = await getActiveWallet(userId, session);
+
+      const available = fromDecimal128(wallet.availableBalance);
+
+      const locked = fromDecimal128(wallet.lockedBalance);
+
+      if (available.lt(validatedAmount)) {
+        throw new AppError("Insufficient available wallet balance.", 400);
+      }
+
+      const newAvailable = available.minus(validatedAmount);
+
+      const newLocked = locked.plus(validatedAmount);
+
+      wallet.availableBalance = toDecimal128(newAvailable);
+
+      wallet.lockedBalance = toDecimal128(newLocked);
+
+      wallet.lastTransactionAt = new Date();
+
+      await wallet.save({
+        session,
+      });
+
+      /*
+      -------------------------------------------------
+      IMPORTANT
+      -------------------------------------------------
+
+      A reservation itself does not represent money
+      entering or leaving the wallet.
+
+      Therefore we do NOT create a normal CREDIT/DEBIT
+      ledger entry here.
+
+      The reservation can later be represented by
+      a dedicated financial event/reservation model.
+      -------------------------------------------------
+      */
+
+      result = {
+        wallet,
+        availableBalance: newAvailable.toFixed(8),
+        lockedBalance: newLocked.toFixed(8),
+      };
+    });
+
+    return result;
+  } finally {
+    await session.endSession();
+  }
+};
+
+/*
+=====================================================
+RELEASE RESERVED FUNDS
+=====================================================
+
+Moves:
+
+LOCKED
+   ↓
+AVAILABLE
+
+Example:
+
+A withdrawal is cancelled.
+=====================================================
+*/
+
+const releaseReservedFunds = async ({
+  userId,
+  amount,
+  reference = null,
+  description = null,
+  metadata = {},
+}) => {
+  const validatedAmount = validateAmount(amount);
+
+  const session = await mongoose.startSession();
+
+  try {
+    let result;
+
+    await session.withTransaction(async () => {
+      const wallet = await getActiveWallet(userId, session);
+
+      const available = fromDecimal128(wallet.availableBalance);
+
+      const locked = fromDecimal128(wallet.lockedBalance);
+
+      if (locked.lt(validatedAmount)) {
+        throw new AppError("Reserved wallet balance is insufficient.", 400);
+      }
+
+      const newAvailable = available.plus(validatedAmount);
+
+      const newLocked = locked.minus(validatedAmount);
+
+      wallet.availableBalance = toDecimal128(newAvailable);
+
+      wallet.lockedBalance = toDecimal128(newLocked);
+
+      wallet.lastTransactionAt = new Date();
+
+      await wallet.save({
+        session,
+      });
+
+      result = {
+        wallet,
+        availableBalance: newAvailable.toFixed(8),
+        lockedBalance: newLocked.toFixed(8),
+      };
+    });
+
+    return result;
+  } finally {
+    await session.endSession();
+  }
+};
+
+/*
+=====================================================
+CONSUME RESERVED FUNDS
+=====================================================
+
+Moves:
+
+LOCKED
+   ↓
+REMOVED
+
+Used when reserved money is actually spent.
+
+Example:
+
+A trade uses reserved margin.
+
+This function creates a DEBIT ledger entry.
+=====================================================
+*/
+
+const consumeReservedFunds = async ({
+  userId,
+  amount,
+  type = "TRADE",
+  reference = null,
+  description = null,
+  metadata = {},
+}) => {
+  const validatedAmount = validateAmount(amount);
+
+  const ledgerType = validateLedgerType(type);
+
+  const session = await mongoose.startSession();
+
+  try {
+    let result;
+
+    await session.withTransaction(async () => {
+      const wallet = await getActiveWallet(userId, session);
+
+      const locked = fromDecimal128(wallet.lockedBalance);
+
+      if (locked.lt(validatedAmount)) {
+        throw new AppError("Reserved wallet balance is insufficient.", 400);
+      }
+
+      const newLocked = locked.minus(validatedAmount);
+
+      wallet.lockedBalance = toDecimal128(newLocked);
+
+      wallet.lastTransactionAt = new Date();
+
+      await wallet.save({
+        session,
+      });
+
+      /*
+      -------------------------------------------------
+      BALANCE AFTER
+
+      The available balance did not change.
+
+      The money was already removed from available
+      balance when it was reserved.
+
+      The ledger therefore records the current
+      available balance.
+      -------------------------------------------------
+      */
+
+      const ledgerEntry = await createLedgerEntry({
+        wallet,
+        userId,
+        type: ledgerType,
+        direction: "DEBIT",
+        amount: validatedAmount,
+        balanceAfter: fromDecimal128(wallet.availableBalance),
+        reference,
+        description,
+        metadata,
+        session,
+      });
 
       result = {
         wallet,
@@ -334,5 +688,8 @@ module.exports = {
   getWalletForUser,
   creditWallet,
   debitWallet,
+  reserveWalletFunds,
+  releaseReservedFunds,
+  consumeReservedFunds,
   decimalToString,
 };

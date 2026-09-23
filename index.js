@@ -12,6 +12,9 @@ const userRoute = require("./src/routes/userRoutes");
 const authRoutes = require("./src/routes/authRoutes");
 const kycRoutes = require("./src/routes/kycRoutes");
 const walletRoute = require("./src/routes/walletRoutes");
+const depositRoutes = require("./src/routes/depositRoutes");
+const paystackWebhookRoutes = require("./src/routes/paystackWebhookRoutes");
+const paystackCallbackRoutes = require("./src/routes/paystackCallbackRoutes");
 
 const app = express();
 
@@ -82,7 +85,13 @@ BODY PARSING
 =====================================================
 */
 
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = Buffer.from(buf);
+    },
+  }),
+);
 
 app.use(
   express.urlencoded({
@@ -130,6 +139,14 @@ QUERY PARSER
 app.set("query parser", "extended");
 
 /*
+====================================================
+Paystack webhook routes
+====================================================
+*/
+app.use("/api/v1/webhooks/paystack", paystackWebhookRoutes);
+app.use("/api/v1/payments", paystackCallbackRoutes);
+
+/*
 =====================================================
 AUTH ROUTES
 =====================================================
@@ -150,14 +167,12 @@ app.use("/api/v1/users", userRoute);
 KYC ROUTES
 =====================================================
 */
-app.use("/api/v1/kyc", kycRoutes)
-
-
-
+app.use("/api/v1/kyc", kycRoutes);
 
 //others routes
 
-app.use("/api/v1/wallet", walletRoute)
+app.use("/api/v1/wallet", walletRoute);
+app.use("/api/v1/deposit", depositRoutes);
 
 /*
 =====================================================
