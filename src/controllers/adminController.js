@@ -1,4 +1,5 @@
 const User = require("../models/UserModel");
+const Deposit = require("../models/DepositModel");
 const catchAsync = require("../utils/catchAsync");
 const AppError = require("../utils/appError");
 
