@@ -26,6 +26,10 @@ router.get("/stats", adminUserController.getUserStats);
 
 router.get("/", adminUserController.getAllUsers);
 
+
+
+router.get("/:id/details", adminUserController.getUserDetails);
+
 // =========================================================
 // GET SINGLE USER
 // =========================================================

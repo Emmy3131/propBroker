@@ -1,4 +1,9 @@
 const User = require("../models/UserModel");
+const Wallet = require("../models/WalletModel");
+const Deposit = require("../models/DepositModel");
+const KYC = require("../models/KYCModel");
+const LedgerEntry = require("../models/LedgerEntryModel");
+
 const catchAsync = require("../utils/catchAsync");
 const AppError = require("../utils/appError");
 
@@ -283,6 +288,376 @@ exports.getUser = catchAsync(async (req, res, next) => {
 
     data: {
       user,
+    },
+  });
+});
+
+// =========================================================
+// GET COMPLETE USER DETAILS
+// GET /api/v1/admin/users/:id/details
+// =========================================================
+
+exports.getUserDetails = catchAsync(async (req, res, next) => {
+  const userId = req.params.id;
+
+  // -------------------------------------------------------
+  // GET USER
+  // -------------------------------------------------------
+
+  const user = await User.findById(userId)
+    .select(
+      [
+        "_id",
+        "name",
+        "email",
+        "phone",
+        "country",
+        "profileImage",
+        "role",
+        "status",
+        "emailVerified",
+        "twoFactorEnabled",
+        "twoFactorEnabledAt",
+        "twoFactorLastUsedAt",
+        "kycStatus",
+        "kycVerifiedAt",
+        "referralCode",
+        "referredBy",
+        "preferences",
+        "lastLoginAt",
+        "lastActiveAt",
+        "accountClosedAt",
+        "createdAt",
+        "updatedAt",
+      ].join(" "),
+    )
+    .populate({
+      path: "referredBy",
+      select: "name email referralCode",
+    })
+    .lean();
+
+  if (!user) {
+    return next(new AppError("User not found.", 404));
+  }
+
+  // -------------------------------------------------------
+  // GET WALLET
+  // -------------------------------------------------------
+
+  const wallet = await Wallet.findOne({
+    user: userId,
+  }).lean();
+
+  // -------------------------------------------------------
+  // GET KYC
+  // -------------------------------------------------------
+  //
+  // We intentionally do NOT return:
+  //
+  // - identityDocumentNumber
+  // - document storageKey
+  // - document URLs
+  //
+  // The KYC page has a separate secure document endpoint.
+  // -------------------------------------------------------
+
+  const kyc = await KYC.findOne({
+    user: userId,
+  })
+    .select(
+      [
+        "_id",
+        "user",
+        "status",
+        "firstName",
+        "lastName",
+        "dateOfBirth",
+        "country",
+        "address",
+        "city",
+        "state",
+        "postalCode",
+        "identityDocumentType",
+        "rejectionReason",
+        "reviewNote",
+        "reviewedBy",
+        "reviewedAt",
+        "submittedAt",
+        "verifiedAt",
+        "rejectedAt",
+        "createdAt",
+        "updatedAt",
+      ].join(" "),
+    )
+    .populate({
+      path: "reviewedBy",
+      select: "name email",
+    })
+    .lean();
+
+  // -------------------------------------------------------
+  // DEPOSIT STATISTICS
+  // -------------------------------------------------------
+
+  const [
+    totalDeposits,
+    successfulDeposits,
+    pendingDeposits,
+    processingDeposits,
+    failedDeposits,
+    cancelledDeposits,
+    expiredDeposits,
+  ] = await Promise.all([
+    Deposit.countDocuments({
+      user: userId,
+    }),
+
+    Deposit.countDocuments({
+      user: userId,
+      status: "successful",
+    }),
+
+    Deposit.countDocuments({
+      user: userId,
+      status: "pending",
+    }),
+
+    Deposit.countDocuments({
+      user: userId,
+      status: "processing",
+    }),
+
+    Deposit.countDocuments({
+      user: userId,
+      status: "failed",
+    }),
+
+    Deposit.countDocuments({
+      user: userId,
+      status: "cancelled",
+    }),
+
+    Deposit.countDocuments({
+      user: userId,
+      status: "expired",
+    }),
+  ]);
+
+  // -------------------------------------------------------
+  // DEPOSIT VOLUME BY CURRENCY
+  // -------------------------------------------------------
+
+  const depositVolume = await Deposit.aggregate([
+    {
+      $match: {
+        user: user._id,
+        status: "successful",
+      },
+    },
+
+    {
+      $group: {
+        _id: "$currency",
+        total: {
+          $sum: "$amount",
+        },
+      },
+    },
+
+    {
+      $sort: {
+        _id: 1,
+      },
+    },
+  ]);
+
+  // -------------------------------------------------------
+  // FORMAT DEPOSIT VOLUME
+  // -------------------------------------------------------
+
+  const depositVolumeByCurrency = {
+    USD: "0",
+    NGN: "0",
+    CAD: "0",
+    EUR: "0",
+  };
+
+  depositVolume.forEach((item) => {
+    if (item._id) {
+      depositVolumeByCurrency[item._id] = item.total?.toString() || "0";
+    }
+  });
+
+  // -------------------------------------------------------
+  // RECENT DEPOSITS
+  // -------------------------------------------------------
+
+  const recentDeposits = await Deposit.find({
+    user: userId,
+  })
+    .select(
+      [
+        "_id",
+        "wallet",
+        "provider",
+        "reference",
+        "providerTransactionId",
+        "providerReference",
+        "amount",
+        "currency",
+        "status",
+        "verifiedAt",
+        "verificationMethod",
+        "creditedAt",
+        "ledgerEntry",
+        "failureReason",
+        "expiresAt",
+        "createdAt",
+        "updatedAt",
+      ].join(" "),
+    )
+    .sort({
+      createdAt: -1,
+    })
+    .limit(20)
+    .lean();
+
+  // -------------------------------------------------------
+  // LEDGER HISTORY
+  // -------------------------------------------------------
+
+  const ledgerEntries = await LedgerEntry.find({
+    user: userId,
+  })
+    .select(
+      [
+        "_id",
+        "wallet",
+        "user",
+        "type",
+        "direction",
+        "amount",
+        "currency",
+        "balanceAfter",
+        "reference",
+        "description",
+        "metadata",
+        "createdAt",
+      ].join(" "),
+    )
+    .sort({
+      createdAt: -1,
+    })
+    .limit(30)
+    .lean();
+
+  // -------------------------------------------------------
+  // REFERRAL INFORMATION
+  // -------------------------------------------------------
+
+  const totalReferredUsers = await User.countDocuments({
+    referredBy: user._id,
+  });
+
+  // -------------------------------------------------------
+  // RESPONSE
+  // -------------------------------------------------------
+
+  res.status(200).json({
+    status: "success",
+
+    data: {
+      // ---------------------------------------------------
+      // USER
+      // ---------------------------------------------------
+
+      user,
+
+      // ---------------------------------------------------
+      // SECURITY
+      // ---------------------------------------------------
+
+      security: {
+        emailVerified: user.emailVerified,
+        twoFactorEnabled: user.twoFactorEnabled,
+        twoFactorEnabledAt: user.twoFactorEnabledAt,
+        twoFactorLastUsedAt: user.twoFactorLastUsedAt,
+        lastLoginAt: user.lastLoginAt,
+        lastActiveAt: user.lastActiveAt,
+      },
+
+      // ---------------------------------------------------
+      // KYC
+      // ---------------------------------------------------
+
+      kyc,
+
+      // ---------------------------------------------------
+      // WALLET
+      // ---------------------------------------------------
+
+      wallet: wallet || null,
+
+      // ---------------------------------------------------
+      // DEPOSITS
+      // ---------------------------------------------------
+
+      deposits: {
+        summary: {
+          totalDeposits,
+          successfulDeposits,
+          pendingDeposits,
+          processingDeposits,
+          failedDeposits,
+          cancelledDeposits,
+          expiredDeposits,
+        },
+
+        volumeByCurrency: depositVolumeByCurrency,
+
+        recent: recentDeposits,
+      },
+
+      // ---------------------------------------------------
+      // LEDGER
+      // ---------------------------------------------------
+
+      ledger: {
+        recent: ledgerEntries,
+      },
+
+      // ---------------------------------------------------
+      // REFERRALS
+      // ---------------------------------------------------
+
+      referrals: {
+        referralCode: user.referralCode || null,
+
+        referredBy: user.referredBy || null,
+
+        totalReferredUsers,
+      },
+
+      // ---------------------------------------------------
+      // WITHDRAWALS
+      // ---------------------------------------------------
+
+      withdrawals: {
+        available: false,
+
+        message: "Withdrawal functionality has not been implemented yet.",
+      },
+
+      // ---------------------------------------------------
+      // TRADING
+      // ---------------------------------------------------
+
+      trading: {
+        available: false,
+
+        message: "Trading functionality has not been implemented yet.",
+      },
     },
   });
 });
