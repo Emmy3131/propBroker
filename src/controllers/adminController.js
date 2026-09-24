@@ -98,9 +98,81 @@ exports.getDashboard = catchAsync(async (req, res, next) => {
     })
     .limit(10);
 
-  // -------------------------------------------------------
+  // =========================================================
+  // DEPOSIT STATISTICS
+  // =========================================================
+
+  const [
+    totalDeposits,
+    successfulDeposits,
+    pendingDeposits,
+    processingDeposits,
+    failedDeposits,
+    cancelledDeposits,
+    expiredDeposits,
+    depositVolume,
+  ] = await Promise.all([
+    Deposit.countDocuments(),
+
+    Deposit.countDocuments({
+      status: "successful",
+    }),
+
+    Deposit.countDocuments({
+      status: "pending",
+    }),
+
+    Deposit.countDocuments({
+      status: "processing",
+    }),
+
+    Deposit.countDocuments({
+      status: "failed",
+    }),
+
+    Deposit.countDocuments({
+      status: "cancelled",
+    }),
+
+    Deposit.countDocuments({
+      status: "expired",
+    }),
+
+    Deposit.aggregate([
+      {
+        $match: {
+          status: "successful",
+        },
+      },
+      {
+        $group: {
+          _id: "$currency",
+          total: {
+            $sum: "$amount",
+          },
+        },
+      },
+    ]),
+  ]);
+
+  // =========================================================
+  // FORMAT DEPOSIT VOLUME BY CURRENCY
+  // =========================================================
+
+  const depositVolumeByCurrency = {
+    USD: "0",
+    NGN: "0",
+    CAD: "0",
+    EUR: "0",
+  };
+
+  depositVolume.forEach((item) => {
+    depositVolumeByCurrency[item._id] = item.total.toString();
+  });
+
+  // =========================================================
   // RESPONSE
-  // -------------------------------------------------------
+  // =========================================================
 
   res.status(200).json({
     status: "success",
@@ -124,6 +196,18 @@ exports.getDashboard = catchAsync(async (req, res, next) => {
         pending: kycPending,
         verified: kycVerified,
         rejected: kycRejected,
+      },
+
+      deposits: {
+        total: totalDeposits,
+        successful: successfulDeposits,
+        pending: pendingDeposits,
+        processing: processingDeposits,
+        failed: failedDeposits,
+        cancelled: cancelledDeposits,
+        expired: expiredDeposits,
+
+        volume: depositVolumeByCurrency,
       },
 
       recentUsers,
