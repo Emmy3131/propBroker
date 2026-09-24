@@ -27,7 +27,7 @@ router.patch("/", kycController.updateKyc);
 
 router.post("/submit", kycController.submitKyc);
 
-router.post("/.document", kycController.uploadDocuments);
+router.post("/documents", kycController.uploadDocuments);
 
 /*
 =====================================================
@@ -36,6 +36,12 @@ ADMIN KYC ROUTES
 */
 
 router.get("/admin", restrictTo("admin"), kycController.getAllKyc);
+
+router.get(
+  "/admin/user/:userId",
+  restrictTo("admin"),
+  kycController.getKycByUserId,
+);
 
 router.get("/admin/:id", restrictTo("admin"), kycController.getKycById);
 

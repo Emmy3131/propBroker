@@ -336,6 +336,40 @@ exports.getKycById = catchAsync(async (req, res, next) => {
 
 /*
 =====================================================
+ADMIN: GET KYC BY USER ID
+GET /api/v1/kyc/admin/user/:userId
+=====================================================
+*/
+
+exports.getKycByUserId = catchAsync(async (req, res, next) => {
+  const kyc = await KYC.findOne({
+    user: req.params.userId,
+  })
+    .populate(
+      "user",
+      "name email phone country profileImage role status emailVerified twoFactorEnabled",
+    )
+    .populate("reviewedBy", "name email");
+
+  if (!kyc) {
+    return res.status(200).json({
+      status: "success",
+      data: {
+        kyc: null,
+      },
+    });
+  }
+
+  res.status(200).json({
+    status: "success",
+    data: {
+      kyc,
+    },
+  });
+});
+
+/*
+=====================================================
 ADMIN: APPROVE KYC
 PATCH /api/v1/kyc/admin/:id/approve
 =====================================================
