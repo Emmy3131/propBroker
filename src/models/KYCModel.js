@@ -98,16 +98,33 @@ const kycSchema = new mongoose.Schema(
     // Store secure storage references instead.
     //
 
-    documentFront: { storageKey: { type: String, default: null } },
+    documentFront: {
+      storageKey: {
+        type: String,
+        default: null,
+      },
+      url: {
+        type: String,
+        default: null,
+      },
+    },
 
-    documentFront: { storageKey: { type: String, default: null } },
+    documentBack: {
+      storageKey: {
+        type: String,
+        default: null,
+      },
+      url: {
+        type: String,
+        default: null,
+      },
+    },
 
     selfie: {
       storageKey: {
         type: String,
         default: null,
       },
-
       url: {
         type: String,
         default: null,
