@@ -1,6 +1,6 @@
 const express = require("express");
 
-const withdrawalController = require("../controllers/withdrawalController");
+const withdrawalController = require("../controllers/userWithdrawalController");
 
 const { protect } = require("../middlewares/authMiddlewares");
 
