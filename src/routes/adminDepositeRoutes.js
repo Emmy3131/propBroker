@@ -30,4 +30,14 @@ GET ALL DEPOSITS
 
 router.get("/", depositController.getAdminDeposits);
 
+
+/*
+=====================================================
+GET SINGLE DEPOSIT
+=====================================================
+*/
+
+router.get("/:id", depositController.getAdminDeposit);
+
+
 module.exports = router;

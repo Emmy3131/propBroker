@@ -730,3 +730,42 @@ exports.getAdminDeposits = catchAsync(async (req, res, next) => {
     },
   });
 });
+
+exports.getAdminDeposit = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+
+  // Validate MongoDB ObjectId
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return next(new AppError("Invalid deposit ID.", 400));
+  }
+
+  const deposit = await Deposit.findById(id)
+    .select("-providerData")
+    .populate({
+      path: "user",
+      select:
+        "name email phone country profileImage role status emailVerified twoFactorEnabled kycStatus referralCode createdAt lastLoginAt lastActiveAt",
+    })
+    .populate({
+      path: "wallet",
+      select:
+        "user currency availableBalance lockedBalance status lastTransactionAt createdAt updatedAt",
+    })
+    .populate({
+      path: "ledgerEntry",
+      select:
+        "wallet user type direction amount currency balanceAfter reference description metadata createdAt",
+    })
+    .lean();
+
+  if (!deposit) {
+    return next(new AppError("Deposit not found.", 404));
+  }
+
+  res.status(200).json({
+    status: "success",
+    data: {
+      deposit,
+    },
+  });
+});
