@@ -68,6 +68,52 @@ const validateAmount = (amount) => {
   };
 };
 
+const WITHDRAWAL_STATUSES = [
+  "pending",
+  "under_review",
+  "approved",
+  "processing",
+  "successful",
+  "rejected",
+  "failed",
+  "cancelled",
+];
+
+/*
+=====================================================
+MONEY HELPERS
+=====================================================
+*/
+
+/*
+ * The wallet uses Decimal128.
+ *
+ * For the current wallet design we keep financial
+ * calculations at 2 decimal places.
+ */
+
+const decimalToCents = (value) => {
+  const stringValue = value?.toString?.() ?? String(value);
+
+  const [wholePart, decimalPart = ""] = stringValue.split(".");
+
+  const paddedDecimal = `${decimalPart}00`.slice(0, 2);
+
+  return BigInt(wholePart || "0") * 100n + BigInt(paddedDecimal || "0");
+};
+
+const centsToDecimal128 = (cents) => {
+  const negative = cents < 0n;
+  const absolute = negative ? -cents : cents;
+
+  const whole = absolute / 100n;
+  const decimal = absolute % 100n;
+
+  return mongoose.Types.Decimal128.fromString(
+    `${negative ? "-" : ""}${whole}.${decimal.toString().padStart(2, "0")}`,
+  );
+};
+
 /*
 =====================================================
 CREATE WITHDRAWAL
@@ -879,3 +925,667 @@ exports.getAdminWithdrawals = catchAsync(async (req, res, next) => {
     },
   });
 });
+
+/*
+=====================================================
+GET SINGLE WITHDRAWAL - ADMIN
+=====================================================
+*/
+
+exports.getAdminWithdrawal = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        status: "fail",
+        message: "Invalid withdrawal ID.",
+      });
+    }
+
+    const withdrawal = await Withdrawal.findById(id)
+      .select("-providerData")
+      .populate(
+        "user",
+        "name email phone country role status emailVerified referralCode createdAt",
+      )
+      .populate(
+        "wallet",
+        "currency availableBalance lockedBalance status lastTransactionAt",
+      )
+      .populate("reviewedBy", "name email role")
+      .populate("processedBy", "name email role")
+      .populate(
+        "ledgerEntry",
+        "type direction amount currency balanceAfter reference description createdAt",
+      );
+
+    if (!withdrawal) {
+      return res.status(404).json({
+        status: "fail",
+        message: "Withdrawal not found.",
+      });
+    }
+
+    /*
+     * Never expose the user's full bank account number
+     * to the frontend.
+     */
+
+    const withdrawalObject = withdrawal.toObject();
+
+    if (withdrawalObject.bankDetails) {
+      const accountNumber = withdrawalObject.bankDetails.accountNumber;
+
+      withdrawalObject.bankDetails = {
+        ...withdrawalObject.bankDetails,
+        accountNumber: accountNumber ? `****${accountNumber.slice(-4)}` : null,
+      };
+    }
+
+    return res.status(200).json({
+      status: "success",
+      data: withdrawalObject,
+    });
+  } catch (error) {
+    console.error("GET ADMIN WITHDRAWAL ERROR:", error);
+
+    return res.status(500).json({
+      status: "error",
+      message: "Unable to fetch withdrawal.",
+    });
+  }
+};
+
+/*
+=====================================================
+MARK WITHDRAWAL AS UNDER REVIEW
+=====================================================
+*/
+
+exports.reviewWithdrawal = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reviewNote } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        status: "fail",
+        message: "Invalid withdrawal ID.",
+      });
+    }
+
+    const withdrawal = await Withdrawal.findById(id);
+
+    if (!withdrawal) {
+      return res.status(404).json({
+        status: "fail",
+        message: "Withdrawal not found.",
+      });
+    }
+
+    if (withdrawal.status !== "pending") {
+      return res.status(400).json({
+        status: "fail",
+        message: `Withdrawal cannot be reviewed from "${withdrawal.status}" status.`,
+      });
+    }
+
+    withdrawal.status = "under_review";
+    withdrawal.reviewedBy = req.user._id;
+    withdrawal.reviewedAt = new Date();
+    withdrawal.reviewNote = reviewNote?.trim() || null;
+
+    await withdrawal.save();
+
+    return res.status(200).json({
+      status: "success",
+      message: "Withdrawal moved to under review.",
+      data: withdrawal,
+    });
+  } catch (error) {
+    console.error("REVIEW WITHDRAWAL ERROR:", error);
+
+    return res.status(500).json({
+      status: "error",
+      message: "Unable to review withdrawal.",
+    });
+  }
+};
+
+/*
+=====================================================
+APPROVE WITHDRAWAL
+=====================================================
+*/
+
+exports.approveWithdrawal = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reviewNote } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        status: "fail",
+        message: "Invalid withdrawal ID.",
+      });
+    }
+
+    const withdrawal = await Withdrawal.findById(id);
+
+    if (!withdrawal) {
+      return res.status(404).json({
+        status: "fail",
+        message: "Withdrawal not found.",
+      });
+    }
+
+    if (
+      withdrawal.status !== "under_review" &&
+      withdrawal.status !== "pending"
+    ) {
+      return res.status(400).json({
+        status: "fail",
+        message: `Withdrawal cannot be approved from "${withdrawal.status}" status.`,
+      });
+    }
+
+    withdrawal.status = "approved";
+
+    withdrawal.reviewedBy = req.user._id;
+    withdrawal.reviewedAt = new Date();
+
+    if (reviewNote !== undefined) {
+      withdrawal.reviewNote = reviewNote?.trim() || null;
+    }
+
+    await withdrawal.save();
+
+    return res.status(200).json({
+      status: "success",
+      message: "Withdrawal approved successfully.",
+      data: withdrawal,
+    });
+  } catch (error) {
+    console.error("APPROVE WITHDRAWAL ERROR:", error);
+
+    return res.status(500).json({
+      status: "error",
+      message: "Unable to approve withdrawal.",
+    });
+  }
+};
+
+/*
+=====================================================
+REJECT WITHDRAWAL
+=====================================================
+*/
+
+exports.rejectWithdrawal = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id } = req.params;
+    const { rejectionReason } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        status: "fail",
+        message: "Invalid withdrawal ID.",
+      });
+    }
+
+    if (!rejectionReason || !rejectionReason.trim()) {
+      return res.status(400).json({
+        status: "fail",
+        message: "Rejection reason is required.",
+      });
+    }
+
+    let updatedWithdrawal;
+
+    await session.withTransaction(async () => {
+      const withdrawal = await Withdrawal.findById(id).session(session);
+
+      if (!withdrawal) {
+        throw new Error("WITHDRAWAL_NOT_FOUND");
+      }
+
+      if (
+        withdrawal.status !== "pending" &&
+        withdrawal.status !== "under_review"
+      ) {
+        throw new Error(`INVALID_STATUS:${withdrawal.status}`);
+      }
+
+      if (withdrawal.ledgerEntry) {
+        throw new Error("WITHDRAWAL_ALREADY_SETTLED");
+      }
+
+      const wallet = await Wallet.findById(withdrawal.wallet).session(session);
+
+      if (!wallet) {
+        throw new Error("WALLET_NOT_FOUND");
+      }
+
+      const amountCents = decimalToCents(withdrawal.amount);
+
+      const lockedCents = decimalToCents(wallet.lockedBalance);
+
+      if (lockedCents < amountCents) {
+        throw new Error("LOCKED_BALANCE_INSUFFICIENT");
+      }
+
+      /*
+       * Return locked money to available balance.
+       */
+
+      const availableCents = decimalToCents(wallet.availableBalance);
+
+      wallet.lockedBalance = centsToDecimal128(lockedCents - amountCents);
+
+      wallet.availableBalance = centsToDecimal128(availableCents + amountCents);
+
+      wallet.lastTransactionAt = new Date();
+
+      await wallet.save({ session });
+
+      withdrawal.status = "rejected";
+      withdrawal.rejectionReason = rejectionReason.trim();
+      withdrawal.reviewedBy = req.user._id;
+      withdrawal.reviewedAt = new Date();
+
+      await withdrawal.save({ session });
+
+      updatedWithdrawal = withdrawal;
+    });
+
+    return res.status(200).json({
+      status: "success",
+      message:
+        "Withdrawal rejected and funds returned to the user's available balance.",
+      data: updatedWithdrawal,
+    });
+  } catch (error) {
+    console.error("REJECT WITHDRAWAL ERROR:", error);
+
+    if (error.message === "WITHDRAWAL_NOT_FOUND") {
+      return res.status(404).json({
+        status: "fail",
+        message: "Withdrawal not found.",
+      });
+    }
+
+    if (error.message.startsWith("INVALID_STATUS:")) {
+      return res.status(400).json({
+        status: "fail",
+        message: `Withdrawal cannot be rejected from "${error.message.split(":")[1]}" status.`,
+      });
+    }
+
+    if (error.message === "LOCKED_BALANCE_INSUFFICIENT") {
+      return res.status(409).json({
+        status: "fail",
+        message:
+          "Wallet locked balance is insufficient to release this withdrawal.",
+      });
+    }
+
+    if (error.message === "WALLET_NOT_FOUND") {
+      return res.status(404).json({
+        status: "fail",
+        message: "Wallet not found.",
+      });
+    }
+
+    return res.status(500).json({
+      status: "error",
+      message: "Unable to reject withdrawal.",
+    });
+  } finally {
+    await session.endSession();
+  }
+};
+
+/*
+=====================================================
+MARK WITHDRAWAL AS PROCESSING
+=====================================================
+*/
+
+exports.processWithdrawal = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        status: "fail",
+        message: "Invalid withdrawal ID.",
+      });
+    }
+
+    const withdrawal = await Withdrawal.findById(id);
+
+    if (!withdrawal) {
+      return res.status(404).json({
+        status: "fail",
+        message: "Withdrawal not found.",
+      });
+    }
+
+    if (withdrawal.status !== "approved") {
+      return res.status(400).json({
+        status: "fail",
+        message: `Only approved withdrawals can be moved to processing. Current status: "${withdrawal.status}".`,
+      });
+    }
+
+    withdrawal.status = "processing";
+    withdrawal.processedBy = req.user._id;
+    withdrawal.processedAt = new Date();
+
+    await withdrawal.save();
+
+    return res.status(200).json({
+      status: "success",
+      message: "Withdrawal moved to processing.",
+      data: withdrawal,
+    });
+  } catch (error) {
+    console.error("PROCESS WITHDRAWAL ERROR:", error);
+
+    return res.status(500).json({
+      status: "error",
+      message: "Unable to process withdrawal.",
+    });
+  }
+};
+
+/*
+=====================================================
+MARK WITHDRAWAL SUCCESSFUL
+=====================================================
+*/
+
+exports.markWithdrawalSuccessful = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        status: "fail",
+        message: "Invalid withdrawal ID.",
+      });
+    }
+
+    let updatedWithdrawal;
+
+    await session.withTransaction(async () => {
+      const withdrawal = await Withdrawal.findById(id).session(session);
+
+      if (!withdrawal) {
+        throw new Error("WITHDRAWAL_NOT_FOUND");
+      }
+
+      /*
+       * Idempotency:
+       *
+       * If this withdrawal has already been completed,
+       * don't debit the wallet again.
+       */
+
+      if (
+        withdrawal.status === "successful" &&
+        withdrawal.ledgerEntry &&
+        withdrawal.completedAt
+      ) {
+        updatedWithdrawal = withdrawal;
+        return;
+      }
+
+      if (withdrawal.status !== "processing") {
+        throw new Error(`INVALID_STATUS:${withdrawal.status}`);
+      }
+
+      const wallet = await Wallet.findById(withdrawal.wallet).session(session);
+
+      if (!wallet) {
+        throw new Error("WALLET_NOT_FOUND");
+      }
+
+      const amountCents = decimalToCents(withdrawal.amount);
+
+      const lockedCents = decimalToCents(wallet.lockedBalance);
+
+      if (lockedCents < amountCents) {
+        throw new Error("LOCKED_BALANCE_INSUFFICIENT");
+      }
+
+      /*
+       * Remove the amount from locked balance.
+       */
+
+      const newLockedCents = lockedCents - amountCents;
+
+      wallet.lockedBalance = centsToDecimal128(newLockedCents);
+
+      wallet.lastTransactionAt = new Date();
+
+      /*
+       * The available balance was already reduced
+       * when the withdrawal was created.
+       *
+       * Therefore we DO NOT reduce availableBalance
+       * again here.
+       */
+
+      await wallet.save({ session });
+
+      /*
+       * Create immutable financial ledger entry.
+       */
+
+      const ledgerEntry = await LedgerEntry.create(
+        [
+          {
+            wallet: wallet._id,
+            user: withdrawal.user,
+            type: "WITHDRAWAL",
+            direction: "DEBIT",
+            amount: withdrawal.amount,
+            currency: withdrawal.currency,
+            balanceAfter: wallet.availableBalance,
+            reference: withdrawal.reference,
+            description: `Withdrawal ${withdrawal.reference} completed.`,
+            metadata: {
+              withdrawalId: withdrawal._id,
+              provider: withdrawal.provider,
+              providerReference: withdrawal.providerReference,
+              providerTransactionId: withdrawal.providerTransactionId,
+            },
+            immutable: true,
+          },
+        ],
+        { session },
+      );
+
+      withdrawal.status = "successful";
+      withdrawal.completedAt = new Date();
+      withdrawal.ledgerEntry = ledgerEntry[0]._id;
+
+      if (!withdrawal.processedBy) {
+        withdrawal.processedBy = req.user._id;
+      }
+
+      if (!withdrawal.processedAt) {
+        withdrawal.processedAt = new Date();
+      }
+
+      updatedWithdrawal = await withdrawal.save({
+        session,
+      });
+    });
+
+    return res.status(200).json({
+      status: "success",
+      message: "Withdrawal marked as successful and ledger entry created.",
+      data: updatedWithdrawal,
+    });
+  } catch (error) {
+    console.error("MARK WITHDRAWAL SUCCESSFUL ERROR:", error);
+
+    if (error.message === "WITHDRAWAL_NOT_FOUND") {
+      return res.status(404).json({
+        status: "fail",
+        message: "Withdrawal not found.",
+      });
+    }
+
+    if (error.message.startsWith("INVALID_STATUS:")) {
+      return res.status(400).json({
+        status: "fail",
+        message: `Withdrawal cannot be completed from "${error.message.split(":")[1]}" status.`,
+      });
+    }
+
+    if (error.message === "WALLET_NOT_FOUND") {
+      return res.status(404).json({
+        status: "fail",
+        message: "Wallet not found.",
+      });
+    }
+
+    if (error.message === "LOCKED_BALANCE_INSUFFICIENT") {
+      return res.status(409).json({
+        status: "fail",
+        message: "Wallet locked balance is insufficient.",
+      });
+    }
+
+    return res.status(500).json({
+      status: "error",
+      message: "Unable to complete withdrawal.",
+    });
+  } finally {
+    await session.endSession();
+  }
+};
+
+/*
+=====================================================
+CANCEL APPROVED WITHDRAWAL
+=====================================================
+*/
+
+exports.cancelWithdrawal = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id } = req.params;
+    const { reviewNote } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        status: "fail",
+        message: "Invalid withdrawal ID.",
+      });
+    }
+
+    let updatedWithdrawal;
+
+    await session.withTransaction(async () => {
+      const withdrawal = await Withdrawal.findById(id).session(session);
+
+      if (!withdrawal) {
+        throw new Error("WITHDRAWAL_NOT_FOUND");
+      }
+
+      if (withdrawal.status !== "approved") {
+        throw new Error(`INVALID_STATUS:${withdrawal.status}`);
+      }
+
+      const wallet = await Wallet.findById(withdrawal.wallet).session(session);
+
+      if (!wallet) {
+        throw new Error("WALLET_NOT_FOUND");
+      }
+
+      const amountCents = decimalToCents(withdrawal.amount);
+
+      const lockedCents = decimalToCents(wallet.lockedBalance);
+
+      if (lockedCents < amountCents) {
+        throw new Error("LOCKED_BALANCE_INSUFFICIENT");
+      }
+
+      const availableCents = decimalToCents(wallet.availableBalance);
+
+      wallet.lockedBalance = centsToDecimal128(lockedCents - amountCents);
+
+      wallet.availableBalance = centsToDecimal128(availableCents + amountCents);
+
+      wallet.lastTransactionAt = new Date();
+
+      await wallet.save({ session });
+
+      withdrawal.status = "cancelled";
+      withdrawal.reviewedBy = req.user._id;
+      withdrawal.reviewedAt = new Date();
+
+      if (reviewNote) {
+        withdrawal.reviewNote = reviewNote.trim();
+      }
+
+      updatedWithdrawal = await withdrawal.save({
+        session,
+      });
+    });
+
+    return res.status(200).json({
+      status: "success",
+      message:
+        "Withdrawal cancelled and funds returned to the available balance.",
+      data: updatedWithdrawal,
+    });
+  } catch (error) {
+    console.error("CANCEL WITHDRAWAL ERROR:", error);
+
+    if (error.message === "WITHDRAWAL_NOT_FOUND") {
+      return res.status(404).json({
+        status: "fail",
+        message: "Withdrawal not found.",
+      });
+    }
+
+    if (error.message.startsWith("INVALID_STATUS:")) {
+      return res.status(400).json({
+        status: "fail",
+        message: `Withdrawal cannot be cancelled from "${error.message.split(":")[1]}" status.`,
+      });
+    }
+
+    if (error.message === "WALLET_NOT_FOUND") {
+      return res.status(404).json({
+        status: "fail",
+        message: "Wallet not found.",
+      });
+    }
+
+    if (error.message === "LOCKED_BALANCE_INSUFFICIENT") {
+      return res.status(409).json({
+        status: "fail",
+        message: "Wallet locked balance is insufficient.",
+      });
+    }
+
+    return res.status(500).json({
+      status: "error",
+      message: "Unable to cancel withdrawal.",
+    });
+  } finally {
+    await session.endSession();
+  }
+};
