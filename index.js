@@ -17,6 +17,7 @@ const paystackWebhookRoutes = require("./src/routes/paystackWebhookRoutes");
 const paystackCallbackRoutes = require("./src/routes/paystackCallbackRoutes");
 const adminRoutes = require("./src/routes/adminRoutes");
 const adminUserRoutes = require("./src/routes/adminUserRoutes");
+const adminDepositRoutes = require("./src/routes/adminDepositeRoutes");
 
 const app = express();
 
@@ -177,6 +178,7 @@ app.use("/api/v1/kyc", kycRoutes);
 
 app.use("/api/v1/wallet", walletRoute);
 app.use("/api/v1/deposit", depositRoutes);
+app.use("./api/v1/admin/deposte", adminDepositRoutes);
 
 /*
 =====================================================

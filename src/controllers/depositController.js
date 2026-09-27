@@ -1,9 +1,14 @@
+const mongoose = require("mongoose");
+
 const Deposit = require("../models/DepositModel");
 const Wallet = require("../models/WalletModel");
+const User = require("../models/UserModel");
 
 const catchAsync = require("../utils/catchAsync");
 const AppError = require("../utils/appError");
+
 const { generateDepositReference } = require("../utils/depositReference");
+
 const {
   initializeTransaction,
 } = require("../services/providers/paystackService");
@@ -375,6 +380,353 @@ exports.getMyDepositByReference = catchAsync(async (req, res, next) => {
     status: "success",
     data: {
       deposit,
+    },
+  });
+});
+
+/*
+=====================================================
+ADMIN - GET ALL DEPOSITS
+=====================================================
+*/
+
+exports.getAdminDeposits = catchAsync(async (req, res, next) => {
+  /*
+  =====================================================
+  1. PAGINATION
+  =====================================================
+  */
+
+  const page = Math.max(Number(req.query.page) || 1, 1);
+
+  const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+
+  const skip = (page - 1) * limit;
+
+  /*
+  =====================================================
+  2. QUERY FILTERS
+  =====================================================
+  */
+
+  const { search, status, provider, currency } = req.query;
+
+  const filter = {};
+
+  /*
+  =====================================================
+  STATUS FILTER
+  =====================================================
+  */
+
+  const allowedStatuses = [
+    "pending",
+    "processing",
+    "successful",
+    "failed",
+    "cancelled",
+    "expired",
+  ];
+
+  if (status && status !== "all") {
+    const normalizedStatus = String(status).toLowerCase();
+
+    if (!allowedStatuses.includes(normalizedStatus)) {
+      return next(new AppError("Invalid deposit status.", 400));
+    }
+
+    filter.status = normalizedStatus;
+  }
+
+  /*
+  =====================================================
+  PROVIDER FILTER
+  =====================================================
+  */
+
+  const allowedProviders = ["paystack", "flutterwave", "stripe"];
+
+  if (provider && provider !== "all") {
+    const normalizedProvider = String(provider).toLowerCase();
+
+    if (!allowedProviders.includes(normalizedProvider)) {
+      return next(new AppError("Invalid payment provider.", 400));
+    }
+
+    filter.provider = normalizedProvider;
+  }
+
+  /*
+  =====================================================
+  CURRENCY FILTER
+  =====================================================
+  */
+
+  const allowedCurrencies = ["USD", "NGN", "CAD", "EUR"];
+
+  if (currency && currency !== "all") {
+    const normalizedCurrency = String(currency).toUpperCase();
+
+    if (!allowedCurrencies.includes(normalizedCurrency)) {
+      return next(new AppError("Invalid currency.", 400));
+    }
+
+    filter.currency = normalizedCurrency;
+  }
+
+  /*
+  =====================================================
+  SEARCH
+  =====================================================
+
+  Search can match:
+
+  - deposit reference
+  - provider reference
+  - provider transaction ID
+  - user name
+  - user email
+  =====================================================
+  */
+
+  let matchingUserIds = [];
+
+  if (search && search.trim()) {
+    const searchValue = search.trim();
+
+    const users = await User.find({
+      $or: [
+        {
+          name: {
+            $regex: searchValue,
+            $options: "i",
+          },
+        },
+        {
+          email: {
+            $regex: searchValue,
+            $options: "i",
+          },
+        },
+      ],
+    })
+      .select("_id")
+      .lean();
+
+    matchingUserIds = users.map((user) => user._id);
+
+    filter.$or = [
+      {
+        reference: {
+          $regex: searchValue,
+          $options: "i",
+        },
+      },
+      {
+        providerReference: {
+          $regex: searchValue,
+          $options: "i",
+        },
+      },
+      {
+        providerTransactionId: {
+          $regex: searchValue,
+          $options: "i",
+        },
+      },
+    ];
+
+    if (matchingUserIds.length > 0) {
+      filter.$or.push({
+        user: {
+          $in: matchingUserIds,
+        },
+      });
+    }
+  }
+
+  /*
+  =====================================================
+  3. GET DEPOSITS + TOTAL
+  =====================================================
+  */
+
+  const [deposits, totalDeposits] = await Promise.all([
+    Deposit.find(filter)
+      .select("-providerData")
+      .populate({
+        path: "user",
+        select: "name email phone country profileImage role status",
+      })
+      .populate({
+        path: "wallet",
+        select: "currency availableBalance lockedBalance status",
+      })
+      .populate({
+        path: "ledgerEntry",
+        select:
+          "type direction amount currency balanceAfter reference description createdAt",
+      })
+      .sort({
+        createdAt: -1,
+      })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+
+    Deposit.countDocuments(filter),
+  ]);
+
+  /*
+  =====================================================
+  4. GLOBAL DEPOSIT SUMMARY
+  =====================================================
+
+  These counts intentionally use the current filter.
+
+  This means when the admin filters by:
+
+  provider=paystack
+
+  the summary also represents Paystack deposits.
+  =====================================================
+  */
+
+  const [
+    totalCount,
+    successfulCount,
+    pendingCount,
+    processingCount,
+    failedCount,
+    cancelledCount,
+    expiredCount,
+  ] = await Promise.all([
+    Deposit.countDocuments(filter),
+
+    Deposit.countDocuments({
+      ...filter,
+      status: "successful",
+    }),
+
+    Deposit.countDocuments({
+      ...filter,
+      status: "pending",
+    }),
+
+    Deposit.countDocuments({
+      ...filter,
+      status: "processing",
+    }),
+
+    Deposit.countDocuments({
+      ...filter,
+      status: "failed",
+    }),
+
+    Deposit.countDocuments({
+      ...filter,
+      status: "cancelled",
+    }),
+
+    Deposit.countDocuments({
+      ...filter,
+      status: "expired",
+    }),
+  ]);
+
+  /*
+  =====================================================
+  5. SUCCESSFUL DEPOSIT VOLUME BY CURRENCY
+  =====================================================
+  */
+
+  const volumeAggregation = await Deposit.aggregate([
+    {
+      $match: {
+        ...filter,
+        status: "successful",
+      },
+    },
+
+    {
+      $group: {
+        _id: "$currency",
+        total: {
+          $sum: "$amount",
+        },
+      },
+    },
+
+    {
+      $sort: {
+        _id: 1,
+      },
+    },
+  ]);
+
+  /*
+  =====================================================
+  6. NORMALIZE CURRENCY VOLUME
+  =====================================================
+  */
+
+  const volumeByCurrency = {
+    USD: "0",
+    NGN: "0",
+    CAD: "0",
+    EUR: "0",
+  };
+
+  volumeAggregation.forEach((item) => {
+    if (item._id) {
+      volumeByCurrency[item._id] = item.total?.toString() || "0";
+    }
+  });
+
+  /*
+  =====================================================
+  7. PAGINATION
+  =====================================================
+  */
+
+  const totalPages = Math.ceil(totalDeposits / limit);
+
+  /*
+  =====================================================
+  8. RESPONSE
+  =====================================================
+  */
+
+  res.status(200).json({
+    status: "success",
+
+    results: deposits.length,
+
+    pagination: {
+      totalDeposits,
+      currentPage: page,
+      perPage: limit,
+      totalPages,
+
+      hasNextPage: page < totalPages,
+
+      hasPreviousPage: page > 1,
+    },
+
+    data: {
+      deposits,
+
+      summary: {
+        totalDeposits: totalCount,
+        successfulDeposits: successfulCount,
+        pendingDeposits: pendingCount,
+        processingDeposits: processingCount,
+        failedDeposits: failedCount,
+        cancelledDeposits: cancelledCount,
+        expiredDeposits: expiredCount,
+      },
+
+      volumeByCurrency,
     },
   });
 });
