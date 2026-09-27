@@ -178,7 +178,7 @@ app.use("/api/v1/kyc", kycRoutes);
 
 app.use("/api/v1/wallet", walletRoute);
 app.use("/api/v1/deposit", depositRoutes);
-app.use("./api/v1/admin/deposte", adminDepositRoutes);
+app.use("./api/v1/admin/depostes", adminDepositRoutes);
 
 /*
 =====================================================
