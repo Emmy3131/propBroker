@@ -182,7 +182,7 @@ app.use("/api/v1/wallet", walletRoute);
 app.use("/api/v1/deposit", depositRoutes);
 app.use("/api/v1/admin/deposits", adminDepositRoutes);
 app.use("/api/v1/admin/withdrawal", adminWithdrawalRoutes);
-app.use("/api/v1/withdawal", userWithdrawalRoutes);
+app.use("/api/v1/withdawals", userWithdrawalRoutes);
 
 /*
 =====================================================
