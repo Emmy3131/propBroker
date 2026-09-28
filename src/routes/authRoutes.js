@@ -59,11 +59,17 @@ router.get("/me", protect, authController.getMe);
 // TWO-FACTOR AUTHENTICATION
 // =========================================================
 
-router.post("/2fa/setup", protect, twoFactorController.setupTwoFactor);
+router.post(
+  "/2fa/setup",
+  protect,
+  protectCsrf,
+  twoFactorController.setupTwoFactor,
+);
 
 router.post(
   "/2fa/verify-setup",
   protect,
+  protectCsrf,
   twoFactorController.verifyTwoFactorSetup,
 );
 
