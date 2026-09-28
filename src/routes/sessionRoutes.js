@@ -1,6 +1,6 @@
 const express = require("express");
 
-const sessionController = require("../controllers/sessionController");
+const sessionController = require("../controllers/SessionController");
 
 const {
   protect,
