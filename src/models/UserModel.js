@@ -316,6 +316,13 @@ userSchema.pre("save", function () {
   this.passwordChangedAt = Date.now() - 1000;
 });
 
+userSchema.methods.correctPassword = async function (
+  candidatePassword,
+  userPassword
+) {
+  return await bcrypt.compare(candidatePassword, userPassword);
+};
+
 // =============================================================
 // COMPARE PASSWORD
 // =============================================================
