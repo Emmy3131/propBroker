@@ -703,3 +703,68 @@ exports.getUserDashboard = async (req, res, next) => {
     next(error);
   }
 };
+
+exports.getMyTransactions = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+
+    const deposits = await Deposit.find({ user: userId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .select(
+        "_id reference provider amount currency status createdAt verifiedAt failureReason",
+      )
+      .lean();
+
+    const withdrawals = await Withdrawal.find({ user: userId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .select(
+        "_id reference provider amount currency status createdAt completedAt rejectionReason failureReason",
+      )
+      .lean();
+
+    const transactions = [
+      ...deposits.map((deposit) => ({
+        id: deposit._id,
+        type: "deposit",
+        reference: deposit.reference,
+        provider: deposit.provider,
+        amount: Number(deposit.amount?.toString() || 0),
+        currency: deposit.currency,
+        status: deposit.status,
+        createdAt: deposit.createdAt,
+        completedAt: deposit.verifiedAt || null,
+        reason: deposit.failureReason || null,
+      })),
+
+      ...withdrawals.map((withdrawal) => ({
+        id: withdrawal._id,
+        type: "withdrawal",
+        reference: withdrawal.reference,
+        provider: withdrawal.provider,
+        amount: Number(withdrawal.amount?.toString() || 0),
+        currency: withdrawal.currency,
+        status: withdrawal.status,
+        createdAt: withdrawal.createdAt,
+        completedAt: withdrawal.completedAt || null,
+        reason: withdrawal.rejectionReason || withdrawal.failureReason || null,
+      })),
+    ];
+
+    transactions.sort(
+      (a, b) =>
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
+
+    return res.status(200).json({
+      status: "success",
+      results: transactions.length,
+      data: {
+        transactions,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};

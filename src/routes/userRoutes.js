@@ -60,6 +60,11 @@ router.get(
 );
 
 
+router.get(
+  "/transactions",
+  protect,
+  userController.getMyTransactions
+);
 /*
 =====================================================
 ADMIN
