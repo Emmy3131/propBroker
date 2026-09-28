@@ -56,15 +56,7 @@ DASHBOARD
 router.get(
   "/dashboard",
   protect,
-  (req, res) => {
-    res.status(200).json({
-      status: "success",
-      message: "Welcome to dashboard",
-      data: {
-        user: req.user,
-      },
-    });
-  }
+  userController.getUserDashboard
 );
 
 
