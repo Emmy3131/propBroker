@@ -5,7 +5,6 @@ const catchAsync = require("../utils/catchAsync");
 const { createSecurityAuditLog } = require("../utils/securityAudit");
 const { uploadKycDocument } = require("../utils/uploadKycDocument");
 
-
 exports.uploadDocuments = catchAsync(async (req, res, next) => {
   console.log("\n========== KYC UPLOAD DEBUG ==========");
 
@@ -13,20 +12,11 @@ exports.uploadDocuments = catchAsync(async (req, res, next) => {
 
   console.log("REQ FILES:", req.files);
 
-  console.log(
-    "DOCUMENT FRONT:",
-    req.files?.documentFront,
-  );
+  console.log("DOCUMENT FRONT:", req.files?.documentFront);
 
-  console.log(
-    "DOCUMENT BACK:",
-    req.files?.documentBack,
-  );
+  console.log("DOCUMENT BACK:", req.files?.documentBack);
 
-  console.log(
-    "SELFIE:",
-    req.files?.selfie,
-  );
+  console.log("SELFIE:", req.files?.selfie);
 
   console.log("REQ BODY:", req.body);
 
@@ -404,47 +394,51 @@ PATCH /api/v1/kyc/admin/:id/approve
 =====================================================
 */
 exports.approveKyc = catchAsync(async (req, res, next) => {
-  const kyc = await KYC.findById(req.params.id);
+  const { id } = req.params;
+  const { reviewNote } = req.body;
+
+  const kyc = await KYC.findById(id);
 
   if (!kyc) {
-    return next(new AppError("KYC application not found.", 404));
+    return next(new AppError("KYC record not found.", 404));
   }
 
-  if (kyc.status !== "under_review") {
-    return next(
-      new AppError("Only KYC applications under review can be approved.", 400),
-    );
+  if (kyc.status === "verified") {
+    return next(new AppError("This KYC application is already verified.", 400));
   }
+
+  /*
+  =====================================================
+  UPDATE KYC
+  =====================================================
+  */
 
   kyc.status = "verified";
   kyc.reviewedBy = req.user._id;
   kyc.reviewedAt = new Date();
   kyc.verifiedAt = new Date();
-
-  kyc.rejectionReason = null;
   kyc.rejectedAt = null;
-
-  if (req.body.reviewNote) {
-    kyc.reviewNote = req.body.reviewNote;
-  }
+  kyc.rejectionReason = null;
+  kyc.reviewNote = reviewNote?.trim() || null;
 
   await kyc.save();
+
+  /*
+  =====================================================
+  UPDATE USER KYC STATUS
+  =====================================================
+  */
 
   await User.findByIdAndUpdate(kyc.user, {
     kycStatus: "verified",
     kycVerifiedAt: new Date(),
   });
 
-  await createSecurityAuditLog({
-    userId: kyc.user,
-    event: "KYC_APPROVED",
-    description: "KYC application was approved by an administrator.",
-    req,
-    metadata: {
-      kycId: kyc._id,
-      reviewedBy: req.user._id,
-    },
-  });
+  /*
+  =====================================================
+  RESPONSE
+  =====================================================
+  */
 
   res.status(200).json({
     status: "success",
@@ -454,7 +448,6 @@ exports.approveKyc = catchAsync(async (req, res, next) => {
     },
   });
 });
-
 /*
 =====================================================
 ADMIN: REJECT KYC
