@@ -502,7 +502,8 @@ exports.getMe = catchAsync(async (req, res, next) => {
 // =========================================================
 
 exports.forgotPassword = catchAsync(async (req, res, next) => {
-  const { email } = req.body;
+  
+  const { email } = req.body || {};
 
   if (!email) {
     return next(new AppError("Please provide your email address", 400));
