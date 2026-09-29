@@ -5,6 +5,35 @@ const catchAsync = require("../utils/catchAsync");
 const { createSecurityAuditLog } = require("../utils/securityAudit");
 const { uploadKycDocument } = require("../utils/uploadKycDocument");
 
+
+exports.uploadDocuments = catchAsync(async (req, res, next) => {
+  console.log("\n========== KYC UPLOAD DEBUG ==========");
+
+  console.log("CONTENT TYPE:", req.headers["content-type"]);
+
+  console.log("REQ FILES:", req.files);
+
+  console.log(
+    "DOCUMENT FRONT:",
+    req.files?.documentFront,
+  );
+
+  console.log(
+    "DOCUMENT BACK:",
+    req.files?.documentBack,
+  );
+
+  console.log(
+    "SELFIE:",
+    req.files?.selfie,
+  );
+
+  console.log("REQ BODY:", req.body);
+
+  console.log("======================================\n");
+
+  // your existing controller code continues here...
+});
 /*
 =====================================================
 GET MY KYC
