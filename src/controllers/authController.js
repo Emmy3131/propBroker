@@ -17,7 +17,10 @@ const {
   hashCsrfToken,
 } = require("../utils/authTokens");
 
-const { sendVerificationEmail } = require("../utils/email");
+const {
+  sendVerificationEmail,
+  sendPasswordResetEmail,
+} = require("../utils/email");
 const { getRefreshTokenCookieOptions } = require("../config/cookies");
 
 const TwoFactorChallenge = require("../models/TwiFactorChallengeModel");
@@ -502,7 +505,6 @@ exports.getMe = catchAsync(async (req, res, next) => {
 // =========================================================
 
 exports.forgotPassword = catchAsync(async (req, res, next) => {
-  
   const { email } = req.body || {};
 
   if (!email) {
@@ -518,9 +520,11 @@ exports.forgotPassword = catchAsync(async (req, res, next) => {
   const genericMessage =
     "If an account with that email exists, a password reset link has been sent.";
 
-  // -----------------------------------------------------
-  // DO NOT REVEAL WHETHER ACCOUNT EXISTS
-  // -----------------------------------------------------
+  /*
+  =====================================================
+  DO NOT REVEAL WHETHER ACCOUNT EXISTS
+  =====================================================
+  */
 
   if (!user) {
     return res.status(200).json({
@@ -529,9 +533,11 @@ exports.forgotPassword = catchAsync(async (req, res, next) => {
     });
   }
 
-  // -----------------------------------------------------
-  // CREATE RESET TOKEN
-  // -----------------------------------------------------
+  /*
+  =====================================================
+  CREATE RESET TOKEN
+  =====================================================
+  */
 
   const resetToken = user.createPasswordResetToken();
 
@@ -539,30 +545,75 @@ exports.forgotPassword = catchAsync(async (req, res, next) => {
     validateBeforeSave: false,
   });
 
-  // -----------------------------------------------------
-  // AUDIT RESET REQUEST
-  // -----------------------------------------------------
+  /*
+  =====================================================
+  AUDIT RESET REQUEST
+  =====================================================
+  */
 
   await createSecurityAuditLog({
     userId: user._id,
+
     event: "PASSWORD_RESET_REQUESTED",
+
     description: "A password reset was requested for the account.",
+
     req,
   });
 
-  // -----------------------------------------------------
-  // TODO:
-  // SEND PASSWORD RESET EMAIL HERE
-  // -----------------------------------------------------
+  /*
+  =====================================================
+  SEND PASSWORD RESET EMAIL
+  =====================================================
+  */
+
+  try {
+    await sendPasswordResetEmail({
+      name: user.name,
+      email: user.email,
+      resetToken,
+    });
+  } catch (error) {
+    console.error("Password reset email failed:", error);
+
+    /*
+    -----------------------------------------------------
+    REMOVE RESET TOKEN IF EMAIL FAILED
+    -----------------------------------------------------
+    */
+
+    user.passwordResetToken = undefined;
+    user.passwordResetExpires = undefined;
+
+    await user.save({
+      validateBeforeSave: false,
+    });
+
+    return next(
+      new AppError(
+        "Unable to send password reset email. Please try again later.",
+        500,
+      ),
+    );
+  }
+
+  /*
+  =====================================================
+  RESPONSE
+  =====================================================
+  */
 
   const response = {
     status: "success",
+
     message: genericMessage,
   };
 
-  // -----------------------------------------------------
-  // DEVELOPMENT ONLY
-  // -----------------------------------------------------
+  /*
+  =====================================================
+  DEVELOPMENT ONLY
+  =====================================================
+  */
 
   if (process.env.NODE_ENV === "development") {
     response.resetToken = resetToken;

@@ -294,8 +294,248 @@ EmmCore Broker
   });
 };
 
+const sendPasswordResetEmail = async ({ name, email, resetToken }) => {
+  const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="UTF-8" />
+
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1.0"
+        />
+
+        <title>Reset Your Password</title>
+      </head>
+
+      <body
+        style="
+          margin: 0;
+          padding: 0;
+          background: #f4f7fb;
+          font-family: Arial, Helvetica, sans-serif;
+        "
+      >
+
+        <div
+          style="
+            max-width: 600px;
+            margin: 40px auto;
+            background: #ffffff;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+          "
+        >
+
+          <!-- Header -->
+
+          <div
+            style="
+              background: #0f172a;
+              padding: 30px;
+              text-align: center;
+            "
+          >
+            <h1
+              style="
+                margin: 0;
+                color: #ffffff;
+                font-size: 28px;
+              "
+            >
+              EmmCore Broker
+            </h1>
+
+            <p
+              style="
+                margin: 8px 0 0;
+                color: #94a3b8;
+                font-size: 14px;
+              "
+            >
+              Trading & Prop Firm Platform
+            </p>
+          </div>
+
+          <!-- Content -->
+
+          <div style="padding: 40px 30px;">
+
+            <h2
+              style="
+                margin-top: 0;
+                color: #111827;
+              "
+            >
+              Reset your password
+            </h2>
+
+            <p
+              style="
+                color: #4b5563;
+                line-height: 1.7;
+              "
+            >
+              Hello ${name},
+            </p>
+
+            <p
+              style="
+                color: #4b5563;
+                line-height: 1.7;
+              "
+            >
+              We received a request to reset the password
+              for your EmmCore Broker account.
+            </p>
+
+            <p
+              style="
+                color: #4b5563;
+                line-height: 1.7;
+              "
+            >
+              Click the button below to create a new password.
+            </p>
+
+            <!-- Reset Button -->
+
+            <div
+              style="
+                text-align: center;
+                margin: 35px 0;
+              "
+            >
+
+              <a
+                href="${resetUrl}"
+                style="
+                  display: inline-block;
+                  padding: 14px 28px;
+                  background: #2563eb;
+                  color: #ffffff;
+                  text-decoration: none;
+                  border-radius: 8px;
+                  font-weight: bold;
+                "
+              >
+                Reset My Password
+              </a>
+
+            </div>
+
+            <p
+              style="
+                color: #6b7280;
+                font-size: 14px;
+                line-height: 1.6;
+              "
+            >
+              This password reset link will expire in
+              <strong>10 minutes</strong>.
+            </p>
+
+            <p
+              style="
+                color: #6b7280;
+                font-size: 14px;
+                line-height: 1.6;
+              "
+            >
+              If you did not request a password reset,
+              you can safely ignore this email.
+              Your password will remain unchanged.
+            </p>
+
+            <hr
+              style="
+                border: none;
+                border-top: 1px solid #e5e7eb;
+                margin: 30px 0;
+              "
+            />
+
+            <p
+              style="
+                color: #9ca3af;
+                font-size: 12px;
+                line-height: 1.5;
+              "
+            >
+              If the button doesn't work, copy and paste
+              this URL into your browser:
+            </p>
+
+            <p
+              style="
+                color: #2563eb;
+                font-size: 12px;
+                word-break: break-all;
+              "
+            >
+              ${resetUrl}
+            </p>
+
+          </div>
+
+          <!-- Footer -->
+
+          <div
+            style="
+              background: #f8fafc;
+              padding: 20px;
+              text-align: center;
+            "
+          >
+            <p
+              style="
+                margin: 0;
+                color: #94a3b8;
+                font-size: 12px;
+              "
+            >
+              © ${new Date().getFullYear()} EmmCore Broker.
+              All rights reserved.
+            </p>
+          </div>
+
+        </div>
+
+      </body>
+    </html>
+  `;
+
+  const text = `
+Hello ${name},
+
+We received a request to reset the password for your EmmCore Broker account.
+
+Use the link below to reset your password:
+
+${resetUrl}
+
+This password reset link will expire in 10 minutes.
+
+If you did not request a password reset, you can safely ignore this email.
+
+EmmCore Broker
+  `;
+
+  return sendEmail({
+    to: email,
+    subject: "Reset your EmmCore Broker password",
+    html,
+    text,
+  });
+};
+
 module.exports = {
   sendEmail,
   sendVerificationEmail,
   verifyEmailTransporter,
+  sendPasswordResetEmail,
 };
