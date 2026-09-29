@@ -1,8 +1,11 @@
 const express = require("express");
 
 const kycController = require("./../controllers/kycControllers");
-const { protect, restrictTo } = require("./../middlewares/authMiddlewares");
 const kycDocumentController = require("./../controllers/kycDocumentsController");
+
+const { protect, restrictTo } = require("./../middlewares/authMiddlewares");
+
+const uploadKyc = require("./../middlewares/uploadKyc");
 
 const router = express.Router();
 
@@ -11,11 +14,12 @@ const router = express.Router();
 ALL KYC ROUTES REQUIRE AUTHENTICATION
 =====================================================
 */
+
 router.use(protect);
 
 /*
 =====================================================
-USER KYC ROUTES
+USER KYC
 =====================================================
 */
 
@@ -27,11 +31,34 @@ router.patch("/", kycController.updateKyc);
 
 router.post("/submit", kycController.submitKyc);
 
-router.post("/documents", kycController.uploadDocuments);
+/*
+=====================================================
+UPLOAD KYC DOCUMENTS
+=====================================================
+*/
+
+router.post(
+  "/documents",
+  uploadKyc.fields([
+    {
+      name: "documentFront",
+      maxCount: 1,
+    },
+    {
+      name: "documentBack",
+      maxCount: 1,
+    },
+    {
+      name: "selfie",
+      maxCount: 1,
+    },
+  ]),
+  kycController.uploadDocuments,
+);
 
 /*
 =====================================================
-ADMIN KYC ROUTES
+ADMIN KYC
 =====================================================
 */
 
