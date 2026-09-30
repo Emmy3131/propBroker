@@ -2,66 +2,30 @@ const mongoose = require("mongoose");
 
 const walletSchema = new mongoose.Schema(
   {
-    /*
-    =================================================
-    OWNER
-    =================================================
-    */
-
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      unique: true,
+      index: true,
     },
-
-    /*
-    =================================================
-    CURRENCY
-    =================================================
-    */
 
     currency: {
       type: String,
       enum: ["USD", "NGN", "CAD", "EUR"],
-      default: "USD",
+      required: true,
       uppercase: true,
       trim: true,
     },
-
-    /*
-    =================================================
-    AVAILABLE BALANCE
-    =================================================
-    */
 
     availableBalance: {
       type: mongoose.Schema.Types.Decimal128,
       default: 0,
     },
 
-    /*
-    =================================================
-    LOCKED BALANCE
-    =================================================
-
-    Examples:
-
-    - Pending withdrawal
-    - Reserved trading funds
-    - Financial holds
-    */
-
     lockedBalance: {
       type: mongoose.Schema.Types.Decimal128,
       default: 0,
     },
-
-    /*
-    =================================================
-    WALLET STATUS
-    =================================================
-    */
 
     status: {
       type: String,
@@ -70,12 +34,6 @@ const walletSchema = new mongoose.Schema(
       index: true,
     },
 
-    /*
-    =================================================
-    LAST TRANSACTION
-    =================================================
-    */
-
     lastTransactionAt: {
       type: Date,
       default: null,
@@ -83,7 +41,23 @@ const walletSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-  }
+  },
+);
+
+/*
+=====================================================
+ONE WALLET PER USER PER CURRENCY
+=====================================================
+*/
+
+walletSchema.index(
+  {
+    user: 1,
+    currency: 1,
+  },
+  {
+    unique: true,
+  },
 );
 
 module.exports = mongoose.model("Wallet", walletSchema);
