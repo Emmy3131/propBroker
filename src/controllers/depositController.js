@@ -8,10 +8,17 @@ const catchAsync = require("../utils/catchAsync");
 const AppError = require("../utils/appError");
 
 const { generateDepositReference } = require("../utils/depositReference");
+const {
+  getWalletForUser,
+  createWalletForUser,
+} = require("../services/walletServices");
 
 const {
   initializeTransaction,
 } = require("../services/providers/paystackService");
+
+
+
 
 /*
 =====================================================
@@ -126,15 +133,11 @@ exports.createDeposit = catchAsync(async (req, res, next) => {
    * 4. Find user's wallet
    * --------------------------------------------
    */
-  const wallet = await Wallet.findOne({
-    user: userId,
-  });
+ let wallet = await getWalletForUser(userId, normalizedCurrency);
 
-  if (!wallet) {
-    return next(
-      new AppError("Wallet not found. Please create your wallet first.", 404),
-    );
-  }
+if (!wallet) {
+  wallet = await createWalletForUser(userId, normalizedCurrency);
+}
 
   /**
    * --------------------------------------------
