@@ -181,7 +181,7 @@ app.use("/api/v1/kyc", kycRoutes);
 
 //others routes
 
-app.use("/api/v1/wallet", walletRoute);
+app.use("/api/v1/wallets", walletRoute);
 app.use("/api/v1/deposits", depositRoutes);
 app.use("/api/v1/admin/deposits", adminDepositRoutes);
 app.use("/api/v1/admin/withdrawals", adminWithdrawalRoutes);
