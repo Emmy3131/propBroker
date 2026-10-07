@@ -30,7 +30,6 @@ GET ALL DEPOSITS
 
 router.get("/", depositController.getAdminDeposits);
 
-
 /*
 =====================================================
 GET SINGLE DEPOSIT
@@ -39,5 +38,28 @@ GET SINGLE DEPOSIT
 
 router.get("/:id", depositController.getAdminDeposit);
 
+/*
+=====================================================
+REVIEW DEPOSIT
+=====================================================
+*/
+
+router.patch("/:id/review", depositController.reviewDeposit);
+
+/*
+=====================================================
+APPROVE DEPOSIT
+=====================================================
+*/
+
+router.post("/:id/approve", depositController.approveDeposit);
+
+/*
+=====================================================
+REJECT DEPOSIT
+=====================================================
+*/
+
+router.post("/:id/reject", depositController.rejectDeposit);
 
 module.exports = router;
