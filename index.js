@@ -22,6 +22,7 @@ const adminWithdrawalRoutes = require("./src/routes/adminWithdrawalRoutes");
 const userWithdrawalRoutes = require("./src/routes/userWithdrawalRoutes")
 const sessionRoutes = require("./src/routes/sessionRoutes");
 const paymentMethodRoutes = require("./src/routes/paymentMethodRoutes");
+const depositRoutes = require("./src/routes/depositRoutes");
 
 
 
