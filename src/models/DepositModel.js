@@ -446,11 +446,8 @@ const depositSchema = new mongoose.Schema(
 
     creditReference: {
       type: String,
-      unique: true,
-      sparse: true,
       trim: true,
       default: null,
-      index: true,
     },
 
     /*

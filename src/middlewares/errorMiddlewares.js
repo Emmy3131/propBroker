@@ -77,13 +77,13 @@ const errorHandler = (err, req, res, next) => {
     */
 
   if (err.code === 11000) {
-    const field = Object.keys(err.keyValue || {})[0];
+  const field = Object.keys(err.keyValue || {})[0];
 
-    error = new AppError(
-      `An account with this ${field || "value"} already exists.`,
-      409,
-    );
-  }
+  error = new AppError(
+    `A record with this ${field || "value"} already exists.`,
+    409,
+  );
+}
 
   /*
     ============================================
