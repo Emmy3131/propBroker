@@ -2,7 +2,7 @@ const Deposit = require("../models/DepositModel");
 
 const {
   verifyTransaction,
-} = require("../services/providers/paystackService");
+} = require("../services/payments/providers/paystackService");
 
 const {
   creditVerifiedDeposit,

@@ -21,6 +21,7 @@ const adminDepositRoutes = require("./src/routes/adminDepositeRoutes");
 const adminWithdrawalRoutes = require("./src/routes/adminWithdrawalRoutes");
 const userWithdrawalRoutes = require("./src/routes/userWithdrawalRoutes")
 const sessionRoutes = require("./src/routes/sessionRoutes");
+const paymentMethodRoutes = require("./src/routes/paymentMethodRoutes");
 
 
 
@@ -187,6 +188,7 @@ app.use("/api/v1/admin/deposits", adminDepositRoutes);
 app.use("/api/v1/admin/withdrawals", adminWithdrawalRoutes);
 app.use("/api/v1/withdawals", userWithdrawalRoutes);
 app.use("/api/v1/auth/sessions", sessionRoutes);
+app.use("/api/v1/payment-methods", paymentMethodRoutes);
 
 /*
 =====================================================

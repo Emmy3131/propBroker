@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 
 const Deposit = require("../models/DepositModel");
-const { verifyTransaction } = require("../services/providers/paystackService");
+const { verifyTransaction } = require("../services/payments/providers/paystackService");
 const {
   creditVerifiedDeposit,
   amountToSubunit,

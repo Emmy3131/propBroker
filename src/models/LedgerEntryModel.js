@@ -107,7 +107,8 @@ const ledgerEntrySchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: null,
-      index: true,
+      unique: true,
+      sparse: true,
     },
 
     /*
@@ -164,11 +165,6 @@ ledgerEntrySchema.index({
 
 ledgerEntrySchema.index({
   user: 1,
-  createdAt: -1,
-});
-
-ledgerEntrySchema.index({
-  reference: 1,
   createdAt: -1,
 });
 

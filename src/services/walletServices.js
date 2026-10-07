@@ -456,12 +456,30 @@ const createLedgerEntry = async ({
 CREDIT WALLET
 =====================================================
 
-Examples:
+IDEMPOTENT FINANCIAL CREDIT
 
-DEPOSIT
-BONUS
-REFUND
-TRANSFER
+A financial reference is treated as an idempotency key.
+
+Example:
+
+reference = DEP-ABC123
+
+First call:
+    wallet + amount
+    ledger entry created
+
+Second call:
+    existing ledger entry found
+    wallet is NOT credited again
+
+This protects against:
+
+- Double admin approval
+- Duplicate API requests
+- Browser retries
+- Network retries
+- Server recovery after partial completion
+- Accidental repeated processing
 
 =====================================================
 */
@@ -481,46 +499,234 @@ const creditWallet = async ({
 
   const normalizedCurrency = normalizeCurrency(currency);
 
+  const normalizedReference =
+    reference === null || reference === undefined
+      ? null
+      : String(reference).trim();
+
+  /*
+  =====================================================
+  FINANCIAL CREDITS MUST HAVE A REFERENCE
+  =====================================================
+  */
+
+  if (!normalizedReference) {
+    throw new AppError(
+      "A unique financial reference is required for wallet credit.",
+      400
+    );
+  }
+
   const session = await mongoose.startSession();
 
   try {
     let result;
 
-    await session.withTransaction(async () => {
-      const wallet = await getActiveWallet(userId, normalizedCurrency, session);
+    try {
+      await session.withTransaction(async () => {
+        /*
+        ================================================
+        1. IDEMPOTENCY CHECK
+        ================================================
+        */
 
-      const currentBalance = fromDecimal128(wallet.availableBalance);
+        const existingLedgerEntry =
+          await LedgerEntry.findOne({
+            reference: normalizedReference,
+          }).session(session);
 
-      const newBalance = currentBalance.plus(validatedAmount);
+        if (existingLedgerEntry) {
+          /*
+          -----------------------------------------------
+          VERIFY EXISTING TRANSACTION
+          -----------------------------------------------
+          */
 
-      wallet.availableBalance = toDecimal128(newBalance);
+          if (existingLedgerEntry.direction !== "CREDIT") {
+            throw new AppError(
+              `Financial reference ${normalizedReference} has already been used by a non-credit transaction.`,
+              409
+            );
+          }
 
-      wallet.lastTransactionAt = new Date();
+          if (
+            existingLedgerEntry.amount?.toString() !==
+              validatedAmount.toString() ||
+            String(existingLedgerEntry.currency).toUpperCase() !==
+              normalizedCurrency ||
+            String(existingLedgerEntry.user) !== String(userId)
+          ) {
+            throw new AppError(
+              "This financial reference has already been used for a different transaction.",
+              409
+            );
+          }
 
-      await wallet.save({
-        session,
+          /*
+          -----------------------------------------------
+          ALREADY PROCESSED
+          -----------------------------------------------
+          */
+
+          const wallet = await Wallet.findById(
+            existingLedgerEntry.wallet
+          ).session(session);
+
+          result = {
+            wallet,
+            ledgerEntry: existingLedgerEntry,
+            alreadyProcessed: true,
+          };
+
+          return;
+        }
+
+        /*
+        ================================================
+        2. GET ACTIVE WALLET
+        ================================================
+        */
+
+        const wallet = await getActiveWallet(
+          userId,
+          normalizedCurrency,
+          session
+        );
+
+        /*
+        ================================================
+        3. CALCULATE NEW BALANCE
+        ================================================
+        */
+
+        const currentBalance = fromDecimal128(
+          wallet.availableBalance
+        );
+
+        const newBalance = currentBalance.plus(
+          validatedAmount
+        );
+
+        /*
+        ================================================
+        4. UPDATE WALLET
+        ================================================
+        */
+
+        wallet.availableBalance =
+          toDecimal128(newBalance);
+
+        wallet.lastTransactionAt = new Date();
+
+        await wallet.save({
+          session,
+        });
+
+        /*
+        ================================================
+        5. CREATE LEDGER ENTRY
+        ================================================
+        */
+
+        const ledgerEntry = await createLedgerEntry({
+          wallet,
+          userId,
+          type: ledgerType,
+          direction: "CREDIT",
+          amount: validatedAmount,
+          balanceAfter: newBalance,
+          reference: normalizedReference,
+          description,
+          metadata,
+          session,
+        });
+
+        /*
+        ================================================
+        6. RETURN NEW RESULT
+        ================================================
+        */
+
+        result = {
+          wallet,
+          ledgerEntry,
+          alreadyProcessed: false,
+        };
       });
 
-      const ledgerEntry = await createLedgerEntry({
-        wallet,
-        userId,
-        type: ledgerType,
-        direction: "CREDIT",
-        amount: validatedAmount,
-        balanceAfter: newBalance,
-        reference,
-        description,
-        metadata,
-        session,
-      });
+      /*
+      Transaction completed normally.
+      */
 
-      result = {
-        wallet,
-        ledgerEntry,
-      };
-    });
+      return result;
+    } catch (error) {
+      /*
+      =================================================
+      DUPLICATE REFERENCE RACE RECOVERY
+      =================================================
 
-    return result;
+      Another request may have successfully committed
+      the same financial reference while this request
+      was running.
+
+      The unique ledger index causes this transaction
+      to fail.
+
+      We then look up the committed transaction AFTER
+      the transaction has ended.
+      =================================================
+      */
+
+      if (error.code === 11000) {
+        const existingLedgerEntry =
+          await LedgerEntry.findOne({
+            reference: normalizedReference,
+          });
+
+        if (!existingLedgerEntry) {
+          throw error;
+        }
+
+        /*
+        Verify that the existing transaction matches
+        the request.
+        */
+
+        if (
+          existingLedgerEntry.direction !== "CREDIT"
+        ) {
+          throw new AppError(
+            `Financial reference ${normalizedReference} has already been used by a non-credit transaction.`,
+            409
+          );
+        }
+
+        if (
+          existingLedgerEntry.amount?.toString() !==
+            validatedAmount.toString() ||
+          String(existingLedgerEntry.currency).toUpperCase() !==
+            normalizedCurrency ||
+          String(existingLedgerEntry.user) !== String(userId)
+        ) {
+          throw new AppError(
+            "This financial reference has already been used for a different transaction.",
+            409
+          );
+        }
+
+        const wallet = await Wallet.findById(
+          existingLedgerEntry.wallet
+        );
+
+        return {
+          wallet,
+          ledgerEntry: existingLedgerEntry,
+          alreadyProcessed: true,
+        };
+      }
+
+      throw error;
+    }
   } finally {
     await session.endSession();
   }
