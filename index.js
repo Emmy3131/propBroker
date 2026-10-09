@@ -12,8 +12,6 @@ const userRoute = require("./src/routes/userRoutes");
 const authRoutes = require("./src/routes/authRoutes");
 const kycRoutes = require("./src/routes/kycRoutes");
 const walletRoute = require("./src/routes/walletRoutes");
-const paystackWebhookRoutes = require("./src/routes/paystackWebhookRoutes");
-const paystackCallbackRoutes = require("./src/routes/paystackCallbackRoutes");
 const adminRoutes = require("./src/routes/adminRoutes");
 const adminUserRoutes = require("./src/routes/adminUserRoutes");
 const adminDepositRoutes = require("./src/routes/adminDepositeRoutes");
@@ -146,14 +144,6 @@ QUERY PARSER
 */
 
 app.set("query parser", "extended");
-
-/*
-====================================================
-Paystack webhook routes
-====================================================
-*/
-app.use("/api/v1/webhooks/paystack", paystackWebhookRoutes);
-app.use("/api/v1/payments", paystackCallbackRoutes);
 
 /*
 =====================================================
