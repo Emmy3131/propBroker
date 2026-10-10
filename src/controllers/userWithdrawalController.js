@@ -404,7 +404,7 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
 
             reference: withdrawalReference,
 
-            provider: "paystack",
+            provider: "manual",
 
             amount: mongoose.Types.Decimal128.fromString(stringValue),
 

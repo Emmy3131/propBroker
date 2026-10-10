@@ -51,7 +51,7 @@ const withdrawalSchema = new mongoose.Schema(
     provider: {
       type: String,
       enum: ["paystack", "flutterwave", "manual"],
-      default: "paystack",
+      default: "manual",
       lowercase: true,
       trim: true,
       index: true,
