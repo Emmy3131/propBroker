@@ -3,7 +3,7 @@ const LedgerEntry = require("../models/LedgerEntryModel");
 const catchAsync = require("../utils/catchAsync");
 const AppError = require("../utils/appError");
 const { randomUUID } = require("crypto");
-const { getExchangeRate } = require("../services/exchangeRateService");
+const { getExchangeRate } = require("../services/exchangeRateServices");
 const Decimal = require("decimal.js");
 const Wallet = require("../models/WalletModel");
 const {
