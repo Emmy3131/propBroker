@@ -1,8 +1,11 @@
+const mongoose = require("mongoose");
 const LedgerEntry = require("../models/LedgerEntryModel");
-
 const catchAsync = require("../utils/catchAsync");
 const AppError = require("../utils/appError");
-
+const { randomUUID } = require("crypto");
+const { getExchangeRate } = require("../services/exchangeRateService");
+const Decimal = require("decimal.js");
+const Wallet = require("../models/WalletModel");
 const {
   getWalletForUser,
   createWalletForUser,
@@ -112,10 +115,7 @@ exports.getMyWallet = catchAsync(async (req, res, next) => {
     */
 
     if (!wallet) {
-      wallet = await createWalletForUser(
-        userId,
-        normalizedCurrency,
-      );
+      wallet = await createWalletForUser(userId, normalizedCurrency);
     }
 
     /*
@@ -183,10 +183,7 @@ exports.getMyWallet = catchAsync(async (req, res, next) => {
     wallets = [];
 
     for (const walletCurrency of currencies) {
-      const wallet = await createWalletForUser(
-        userId,
-        walletCurrency,
-      );
+      const wallet = await createWalletForUser(userId, walletCurrency);
 
       if (wallet) {
         wallets.push(wallet);
@@ -236,10 +233,7 @@ exports.getMyLedger = catchAsync(async (req, res, next) => {
 
   const page = Math.max(Number(req.query.page) || 1, 1);
 
-  const limit = Math.min(
-    Math.max(Number(req.query.limit) || 20, 1),
-    100,
-  );
+  const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
 
   const skip = (page - 1) * limit;
 
@@ -330,6 +324,216 @@ exports.getMyLedger = catchAsync(async (req, res, next) => {
 
     data: {
       transactions,
+    },
+  });
+});
+
+/*
+=====================================================
+CONVERT WALLET CURRENCY
+=====================================================
+
+POST /api/v1/wallets/convert
+
+Body:
+{
+    "fromCurrency": "USD",
+    "toCurrency": "NGN"
+}
+
+Converts the source wallet's entire AVAILABLE balance.
+Locked funds are not converted.
+=====================================================
+*/
+
+exports.convertWalletCurrency = catchAsync(async (req, res, next) => {
+  const userId = req.user._id;
+
+  let fromCurrency;
+  let toCurrency;
+
+  try {
+    fromCurrency = normalizeCurrency(req.body.fromCurrency);
+    toCurrency = normalizeCurrency(req.body.toCurrency);
+  } catch (error) {
+    return next(error);
+  }
+
+  if (fromCurrency === toCurrency) {
+    return next(new AppError("Select a different target currency.", 400));
+  }
+
+  let exchange;
+
+  try {
+    exchange = await getExchangeRate(fromCurrency, toCurrency);
+  } catch (error) {
+    return next(
+      new AppError(
+        error.message || "Exchange rates are temporarily unavailable.",
+        503,
+      ),
+    );
+  }
+
+  const rate = new Decimal(exchange.rate);
+  const conversionReference = `FX-${randomUUID()}`;
+
+  const session = await mongoose.startSession();
+
+  let result;
+
+  try {
+    await session.withTransaction(async () => {
+      const sourceWallet = await Wallet.findOne({
+        user: userId,
+        currency: fromCurrency,
+      }).session(session);
+
+      if (!sourceWallet) {
+        throw new AppError(`Your ${fromCurrency} wallet was not found.`, 404);
+      }
+
+      if (sourceWallet.status !== "active") {
+        throw new AppError("Your source wallet is not active.", 403);
+      }
+
+      const sourceBalance = new Decimal(
+        sourceWallet.availableBalance?.toString() || "0",
+      );
+
+      if (!sourceBalance.isFinite() || sourceBalance.lte(0)) {
+        throw new AppError(
+          `Your ${fromCurrency} wallet has no available balance to convert.`,
+          400,
+        );
+      }
+
+      let targetWallet = await Wallet.findOne({
+        user: userId,
+        currency: toCurrency,
+      }).session(session);
+
+      if (targetWallet && targetWallet.status !== "active") {
+        throw new AppError("Your target wallet is not active.", 403);
+      }
+
+      if (!targetWallet) {
+        targetWallet = new Wallet({
+          user: userId,
+          currency: toCurrency,
+          availableBalance: "0",
+          lockedBalance: "0",
+          status: "active",
+        });
+      }
+
+      // All source available funds are converted.
+      // Target currency amounts are rounded down to 2 decimals.
+      const convertedAmount = sourceBalance
+        .mul(rate)
+        .toDecimalPlaces(2, Decimal.ROUND_DOWN);
+
+      if (convertedAmount.lte(0)) {
+        throw new AppError("The converted amount is too small to credit.", 400);
+      }
+
+      const targetBalanceBefore = new Decimal(
+        targetWallet.availableBalance?.toString() || "0",
+      );
+
+      const targetBalanceAfter = targetBalanceBefore.plus(convertedAmount);
+
+      // Debit source and credit target in one transaction.
+      sourceWallet.availableBalance = "0";
+      sourceWallet.lastTransactionAt = new Date();
+
+      targetWallet.availableBalance = targetBalanceAfter.toFixed(2);
+      targetWallet.lastTransactionAt = new Date();
+
+      await sourceWallet.save({ session });
+      await targetWallet.save({ session });
+
+      // Ledger entries are immutable: create a debit and a credit.
+      await LedgerEntry.create(
+        [
+          {
+            wallet: sourceWallet._id,
+            user: userId,
+            type: "TRANSFER",
+            direction: "DEBIT",
+            amount: sourceBalance.toFixed(),
+            currency: fromCurrency,
+            balanceAfter: "0",
+            reference: `${conversionReference}-DEBIT`,
+            description: `Currency conversion from ${fromCurrency} to ${toCurrency}`,
+            metadata: {
+              conversionReference,
+              fromCurrency,
+              toCurrency,
+              exchangeRate: rate.toString(),
+              convertedAmount: convertedAmount.toFixed(2),
+              side: "debit",
+              rateProvider: exchange.provider,
+              rateUpdatedAt: exchange.rateUpdatedAt,
+            },
+          },
+          {
+            wallet: targetWallet._id,
+            user: userId,
+            type: "TRANSFER",
+            direction: "CREDIT",
+            amount: convertedAmount.toFixed(2),
+            currency: toCurrency,
+            balanceAfter: targetBalanceAfter.toFixed(2),
+            reference: `${conversionReference}-CREDIT`,
+            description: `Currency conversion from ${fromCurrency} to ${toCurrency}`,
+            metadata: {
+              conversionReference,
+              fromCurrency,
+              toCurrency,
+              exchangeRate: rate.toString(),
+              sourceAmount: sourceBalance.toFixed(),
+              side: "credit",
+              rateProvider: exchange.provider,
+              rateUpdatedAt: exchange.rateUpdatedAt,
+            },
+          },
+        ],
+        { session },
+      );
+
+      result = {
+        reference: conversionReference,
+        fromCurrency,
+        toCurrency,
+        sourceAmount: sourceBalance.toFixed(),
+        convertedAmount: convertedAmount.toFixed(2),
+        exchangeRate: rate.toString(),
+        rateUpdatedAt: exchange.rateUpdatedAt,
+        sourceWallet: {
+          id: sourceWallet._id,
+          currency: fromCurrency,
+          availableBalance: "0",
+          lockedBalance: sourceWallet.lockedBalance?.toString() || "0",
+        },
+        targetWallet: {
+          id: targetWallet._id,
+          currency: toCurrency,
+          availableBalance: targetBalanceAfter.toFixed(2),
+          lockedBalance: targetWallet.lockedBalance?.toString() || "0",
+        },
+      };
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  return res.status(200).json({
+    status: "success",
+    message: "Wallet currency converted successfully.",
+    data: {
+      conversion: result,
     },
   });
 });
