@@ -6,7 +6,6 @@ const walletSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      index: true,
     },
 
     baseCurrency: {
@@ -19,6 +18,7 @@ const walletSchema = new mongoose.Schema(
     displayCurrency: {
       type: String,
       enum: ["USD", "NGN", "CAD", "EUR"],
+      default: "USD",
       required: true,
       uppercase: true,
       trim: true,
@@ -27,11 +27,13 @@ const walletSchema = new mongoose.Schema(
     availableBalance: {
       type: mongoose.Schema.Types.Decimal128,
       default: 0,
+      required: true,
     },
 
     lockedBalance: {
       type: mongoose.Schema.Types.Decimal128,
       default: 0,
+      required: true,
     },
 
     status: {
@@ -51,20 +53,10 @@ const walletSchema = new mongoose.Schema(
   },
 );
 
-/*
-=====================================================
-ONE WALLET PER USER PER CURRENCY
-=====================================================
-*/
-
+// Exactly one wallet document per user.
 walletSchema.index(
-  {
-    user: 1,
-    currency: 1,
-  },
-  {
-    unique: true,
-  },
+  { user: 1 },
+  { unique: true, name: "unique_wallet_per_user" },
 );
 
 module.exports = mongoose.model("Wallet", walletSchema);

@@ -1,32 +1,22 @@
 const express = require("express");
 
 const walletController = require("../controllers/WalletController");
-
 const { protect } = require("../middlewares/authMiddlewares");
 
 const router = express.Router();
 
-/*
-=====================================================
-ALL WALLET ROUTES REQUIRE AUTHENTICATION
-=====================================================
-*/
+// All wallet routes require authentication.
 router.use(protect);
 
-/*
-=====================================================
-USER WALLET
-=====================================================
-*/
-
+// Get the user's single wallet.
 router.get("/", walletController.getMyWallet);
 
+// Get wallet ledger history.
 router.get("/ledger", walletController.getMyLedger);
 
-// Actual wallet currency conversion
+// Change the display currency without converting the balance.
 router.patch(
   "/display-currency",
-  protect,
   walletController.updateMyDisplayCurrency
 );
 

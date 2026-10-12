@@ -1,15 +1,10 @@
 const crypto = require("crypto");
-
 const User = require("../models/UserModel");
 const Session = require("../models/SessionModel");
-
 const { createSession } = require("../utils/sessions");
-
 const { createSecurityAuditLog } = require("../utils/securityAudit");
-
 const catchAsync = require("../utils/catchAsync");
 const AppError = require("../utils/appError");
-
 const {
   generateRefreshToken,
   hashRefreshToken,

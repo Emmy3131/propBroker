@@ -2,6 +2,7 @@ const LedgerEntry = require("../models/LedgerEntryModel");
 const catchAsync = require("../utils/catchAsync");
 const AppError = require("../utils/appError");
 const Wallet = require("../models/WalletModel");
+const Decimal = require("decimal.js");
 
 const {
   getWalletForUser,
@@ -32,7 +33,7 @@ const normalizeCurrency = (currency) => {
   if (!SUPPORTED_CURRENCIES.includes(normalized)) {
     throw new AppError(
       "Unsupported currency. Choose USD, NGN, CAD or EUR.",
-      400,
+      400
     );
   }
 
@@ -44,42 +45,44 @@ const normalizeCurrency = (currency) => {
 FORMAT WALLET
 =====================================================
 
-Every user has one wallet.
+The wallet stores its actual accounting balance
+in USD. Display currency is only a preference.
 
-baseCurrency:
-The currency in which real wallet balances are stored.
-
-displayCurrency:
-The currency the user prefers to see in the interface.
-
-Changing displayCurrency never changes the balance.
+Total balance = available balance + locked balance.
 =====================================================
 */
 
 const formatWallet = (wallet) => {
   if (!wallet) return null;
 
-  const availableBalance = wallet.availableBalance?.toString() || "0";
-  const lockedBalance = wallet.lockedBalance?.toString() || "0";
+  const availableBalance =
+    wallet.availableBalance?.toString() || "0";
+
+  const lockedBalance =
+    wallet.lockedBalance?.toString() || "0";
+
+  // Calculate the total for THIS wallet.
+  // Decimal.js avoids ordinary floating-point errors.
+  const totalBalance = new Decimal(availableBalance)
+    .plus(new Decimal(lockedBalance))
+    .toString();
+
+  const baseCurrency =
+    wallet.baseCurrency || wallet.currency || "USD";
 
   return {
     id: wallet._id,
 
-    // Actual accounting currency.
-    baseCurrency: wallet.baseCurrency || "USD",
+    baseCurrency,
 
-    // Keep for compatibility with existing frontend code.
-    currency: wallet.baseCurrency || "USD",
+    // Backward compatibility with existing frontend code.
+    currency: baseCurrency,
 
-    // User's display preference.
     displayCurrency: wallet.displayCurrency || "USD",
 
     availableBalance,
     lockedBalance,
-
-    totalBalance: (
-      Number(availableBalance) + Number(lockedBalance)
-    ).toString(),
+    totalBalance,
 
     status: wallet.status,
     lastTransactionAt: wallet.lastTransactionAt,
@@ -94,40 +97,33 @@ GET MY WALLET
 =====================================================
 
 GET /api/v1/wallets
+GET /api/v1/wallets?currency=USD
 
-GET /api/v1/wallets?currency=NGN
-
-Returns the user's single USD-based wallet.
-
-The optional currency query is validated for
-compatibility, but it does not create another wallet
-or change the saved display preference.
+Returns the user's existing wallet or creates
+one USD wallet if none exists.
 =====================================================
 */
 
 exports.getMyWallet = catchAsync(async (req, res, next) => {
   const userId = req.user._id;
 
-  // Support existing frontend requests that include
-  // ?currency=USD, ?currency=NGN, etc.
   if (req.query.currency) {
-    try {
-      normalizeCurrency(req.query.currency);
-    } catch (error) {
-      return next(error);
-    }
+    normalizeCurrency(req.query.currency);
   }
 
   let wallet = await getWalletForUser(userId);
 
-  // Create only one wallet if the user does not have one.
   if (!wallet) {
+    // Always create the accounting wallet in USD.
     wallet = await createWalletForUser(userId, "USD");
   }
 
   if (!wallet) {
     return next(
-      new AppError("Unable to retrieve or create your wallet.", 500),
+      new AppError(
+        "Unable to retrieve or create your wallet.",
+        500
+      )
     );
   }
 
@@ -138,8 +134,7 @@ exports.getMyWallet = catchAsync(async (req, res, next) => {
     data: {
       wallet: formattedWallet,
 
-      // Temporary compatibility for components that
-      // previously expected data.wallets.
+      // Compatibility with older frontend components.
       wallets: [formattedWallet],
     },
   });
@@ -157,13 +152,8 @@ Body:
   "displayCurrency": "NGN"
 }
 
-This changes the user's display preference only.
-
-It does NOT:
-- Move funds.
-- Change availableBalance or lockedBalance.
-- Create another wallet.
-- Create a transfer ledger entry.
+This only saves the display preference.
+It does not convert or transfer money.
 =====================================================
 */
 
@@ -171,23 +161,24 @@ exports.updateMyDisplayCurrency = catchAsync(
   async (req, res, next) => {
     const userId = req.user._id;
 
-    let displayCurrency;
-
-    try {
-      displayCurrency = normalizeCurrency(req.body.displayCurrency);
-    } catch (error) {
-      return next(error);
-    }
+    const displayCurrency = normalizeCurrency(
+      req.body.displayCurrency
+    );
 
     let wallet = await getWalletForUser(userId);
 
     if (!wallet) {
-      wallet = await createWalletForUser(userId, displayCurrency);
+      // Display preference must never determine
+      // the accounting wallet's currency.
+      wallet = await createWalletForUser(userId, "USD");
     }
 
     if (!wallet) {
       return next(
-        new AppError("Unable to retrieve or create your wallet.", 500),
+        new AppError(
+          "Unable to retrieve or create your wallet.",
+          500
+        )
       );
     }
 
@@ -195,12 +186,11 @@ exports.updateMyDisplayCurrency = catchAsync(
       return next(
         new AppError(
           "Your wallet is closed. Its settings cannot be changed.",
-          403,
-        ),
+          403
+        )
       );
     }
 
-    // Save the preference only. Do not modify balances.
     wallet.displayCurrency = displayCurrency;
 
     await wallet.save();
@@ -212,7 +202,7 @@ exports.updateMyDisplayCurrency = catchAsync(
         wallet: formatWallet(wallet),
       },
     });
-  },
+  }
 );
 
 /*
@@ -220,20 +210,10 @@ exports.updateMyDisplayCurrency = catchAsync(
 LEGACY CURRENCY CONVERSION ENDPOINT
 =====================================================
 
-Keep this export temporarily so an existing route
-that references convertWalletCurrency does not crash.
+This endpoint no longer converts balances.
 
-This no longer performs a financial conversion.
-
-Legacy request:
-{
-  "fromCurrency": "USD",
-  "toCurrency": "NGN"
-}
-
-Only toCurrency is used as the display preference.
-New frontend code should use:
-PATCH /api/v1/wallets/display-currency
+It only updates displayCurrency so existing routes
+can continue working while the frontend is updated.
 =====================================================
 */
 
@@ -242,25 +222,24 @@ exports.convertWalletCurrency = catchAsync(
     const requestedCurrency =
       req.body.displayCurrency || req.body.toCurrency;
 
-    let displayCurrency;
-
-    try {
-      displayCurrency = normalizeCurrency(requestedCurrency);
-    } catch (error) {
-      return next(error);
-    }
+    const displayCurrency = normalizeCurrency(
+      requestedCurrency
+    );
 
     const userId = req.user._id;
 
     let wallet = await getWalletForUser(userId);
 
     if (!wallet) {
-      wallet = await createWalletForUser(userId, displayCurrency);
+      wallet = await createWalletForUser(userId, "USD");
     }
 
     if (!wallet) {
       return next(
-        new AppError("Unable to retrieve or create your wallet.", 500),
+        new AppError(
+          "Unable to retrieve or create your wallet.",
+          500
+        )
       );
     }
 
@@ -268,8 +247,8 @@ exports.convertWalletCurrency = catchAsync(
       return next(
         new AppError(
           "Your wallet is closed. Its settings cannot be changed.",
-          403,
-        ),
+          403
+        )
       );
     }
 
@@ -285,7 +264,7 @@ exports.convertWalletCurrency = catchAsync(
         wallet: formatWallet(wallet),
       },
     });
-  },
+  }
 );
 
 /*
@@ -295,124 +274,109 @@ GET MY LEDGER
 
 GET /api/v1/wallets/ledger
 
-Optional query parameters:
+Optional:
 ?page=1
-?limit=20
-?type=DEPOSIT
-?currency=USD
-
-Ledger currency represents the currency recorded on
-each transaction. Under the single-USD-wallet model,
-new wallet balance entries should use USD.
+&limit=20
+&type=DEPOSIT
+&currency=USD
 =====================================================
 */
 
-exports.getMyLedger = catchAsync(async (req, res, next) => {
-  /*
-  ===================================================
-  PAGINATION
-  ===================================================
-  */
+exports.getMyLedger = catchAsync(
+  async (req, res, next) => {
+    const page = Math.max(
+      Number(req.query.page) || 1,
+      1
+    );
 
-  const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(
+      Math.max(Number(req.query.limit) || 20, 1),
+      100
+    );
 
-  const limit = Math.min(
-    Math.max(Number(req.query.limit) || 20, 1),
-    100,
-  );
+    const skip = (page - 1) * limit;
 
-  const skip = (page - 1) * limit;
+    const filter = {
+      user: req.user._id,
+    };
 
-  /*
-  ===================================================
-  BASE FILTER
-  ===================================================
-  */
+    /*
+    ===============================================
+    TYPE FILTER
+    ===============================================
+    */
 
-  const filter = {
-    user: req.user._id,
-  };
+    if (req.query.type) {
+      const type = String(req.query.type)
+        .trim()
+        .toUpperCase();
 
-  /*
-  ===================================================
-  TYPE FILTER
-  ===================================================
-  */
+      if (!/^[A-Z_]+$/.test(type)) {
+        return next(
+          new AppError(
+            "Invalid ledger transaction type.",
+            400
+          )
+        );
+      }
 
-  if (req.query.type) {
-    const type = String(req.query.type).trim().toUpperCase();
-
-    if (!/^[A-Z_]+$/.test(type)) {
-      return next(new AppError("Invalid ledger transaction type.", 400));
+      filter.type = type;
     }
 
-    filter.type = type;
-  }
+    /*
+    ===============================================
+    CURRENCY FILTER
+    ===============================================
+    */
 
-  /*
-  ===================================================
-  CURRENCY FILTER
-  ===================================================
-  */
+    if (req.query.currency) {
+      const currency = normalizeCurrency(
+        req.query.currency
+      );
 
-  if (req.query.currency) {
-    let currency;
-
-    try {
-      currency = normalizeCurrency(req.query.currency);
-    } catch (error) {
-      return next(error);
+      filter.currency = currency;
     }
 
-    filter.currency = currency;
+    /*
+    ===============================================
+    GET TRANSACTIONS AND COUNT
+    ===============================================
+    */
+
+    const [transactions, total] = await Promise.all([
+      LedgerEntry.find(filter)
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+
+      LedgerEntry.countDocuments(filter),
+    ]);
+
+    const totalPages = Math.ceil(total / limit);
+
+    /*
+    ===============================================
+    RESPONSE
+    ===============================================
+    */
+
+    return res.status(200).json({
+      status: "success",
+      results: transactions.length,
+
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1,
+      },
+
+      data: {
+        transactions,
+      },
+    });
   }
-
-  /*
-  ===================================================
-  GET TRANSACTIONS AND COUNT
-  ===================================================
-  */
-
-  const [transactions, total] = await Promise.all([
-    LedgerEntry.find(filter)
-      .sort({ createdAt: -1, _id: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-
-    LedgerEntry.countDocuments(filter),
-  ]);
-
-  /*
-  ===================================================
-  PAGINATION
-  ===================================================
-  */
-
-  const totalPages = Math.ceil(total / limit);
-
-  /*
-  ===================================================
-  RESPONSE
-  ===================================================
-  */
-
-  return res.status(200).json({
-    status: "success",
-
-    results: transactions.length,
-
-    pagination: {
-      total,
-      page,
-      limit,
-      pages: totalPages,
-      hasNextPage: page < totalPages,
-      hasPreviousPage: page > 1,
-    },
-
-    data: {
-      transactions,
-    },
-  });
-});
+);
