@@ -1,11 +1,8 @@
-const mongoose = require("mongoose");
 const LedgerEntry = require("../models/LedgerEntryModel");
 const catchAsync = require("../utils/catchAsync");
 const AppError = require("../utils/appError");
-const { randomUUID } = require("crypto");
-const { getExchangeRate } = require("../services/exchangeRateServices");
-const Decimal = require("decimal.js");
 const Wallet = require("../models/WalletModel");
+
 const {
   getWalletForUser,
   createWalletForUser,
@@ -26,11 +23,15 @@ NORMALIZE CURRENCY
 */
 
 const normalizeCurrency = (currency) => {
-  const normalized = String(currency).trim().toUpperCase();
+  if (typeof currency !== "string" || !currency.trim()) {
+    throw new AppError("Please provide a currency.", 400);
+  }
+
+  const normalized = currency.trim().toUpperCase();
 
   if (!SUPPORTED_CURRENCIES.includes(normalized)) {
     throw new AppError(
-      `Unsupported wallet currency: ${normalized}. Supported currencies are USD, NGN, CAD and EUR.`,
+      "Unsupported currency. Choose USD, NGN, CAD or EUR.",
       400,
     );
   }
@@ -42,171 +43,250 @@ const normalizeCurrency = (currency) => {
 =====================================================
 FORMAT WALLET
 =====================================================
+
+Every user has one wallet.
+
+baseCurrency:
+The currency in which real wallet balances are stored.
+
+displayCurrency:
+The currency the user prefers to see in the interface.
+
+Changing displayCurrency never changes the balance.
+=====================================================
 */
 
 const formatWallet = (wallet) => {
+  if (!wallet) return null;
+
+  const availableBalance = wallet.availableBalance?.toString() || "0";
+  const lockedBalance = wallet.lockedBalance?.toString() || "0";
+
   return {
     id: wallet._id,
-    currency: wallet.currency,
 
-    availableBalance: wallet.availableBalance?.toString() || "0",
+    // Actual accounting currency.
+    baseCurrency: wallet.baseCurrency || "USD",
 
-    lockedBalance: wallet.lockedBalance?.toString() || "0",
+    // Keep for compatibility with existing frontend code.
+    currency: wallet.baseCurrency || "USD",
+
+    // User's display preference.
+    displayCurrency: wallet.displayCurrency || "USD",
+
+    availableBalance,
+    lockedBalance,
+
+    totalBalance: (
+      Number(availableBalance) + Number(lockedBalance)
+    ).toString(),
 
     status: wallet.status,
-
     lastTransactionAt: wallet.lastTransactionAt,
-
     createdAt: wallet.createdAt,
-
     updatedAt: wallet.updatedAt,
   };
 };
 
 /*
 =====================================================
-GET MY WALLETS
+GET MY WALLET
 =====================================================
 
 GET /api/v1/wallets
 
-Returns all existing wallets.
-
 GET /api/v1/wallets?currency=NGN
 
-Returns the user's NGN wallet.
+Returns the user's single USD-based wallet.
 
-If the requested wallet does not exist,
-it will be created automatically.
+The optional currency query is validated for
+compatibility, but it does not create another wallet
+or change the saved display preference.
 =====================================================
 */
 
 exports.getMyWallet = catchAsync(async (req, res, next) => {
   const userId = req.user._id;
-  const { currency } = req.query;
 
-  /*
-  ===================================================
-  GET SPECIFIC CURRENCY WALLET
-  ===================================================
-  */
+  // Support existing frontend requests that include
+  // ?currency=USD, ?currency=NGN, etc.
+  if (req.query.currency) {
+    try {
+      normalizeCurrency(req.query.currency);
+    } catch (error) {
+      return next(error);
+    }
+  }
 
-  if (currency) {
-    let normalizedCurrency;
+  let wallet = await getWalletForUser(userId);
+
+  // Create only one wallet if the user does not have one.
+  if (!wallet) {
+    wallet = await createWalletForUser(userId, "USD");
+  }
+
+  if (!wallet) {
+    return next(
+      new AppError("Unable to retrieve or create your wallet.", 500),
+    );
+  }
+
+  const formattedWallet = formatWallet(wallet);
+
+  return res.status(200).json({
+    status: "success",
+    data: {
+      wallet: formattedWallet,
+
+      // Temporary compatibility for components that
+      // previously expected data.wallets.
+      wallets: [formattedWallet],
+    },
+  });
+});
+
+/*
+=====================================================
+UPDATE MY DISPLAY CURRENCY
+=====================================================
+
+PATCH /api/v1/wallets/display-currency
+
+Body:
+{
+  "displayCurrency": "NGN"
+}
+
+This changes the user's display preference only.
+
+It does NOT:
+- Move funds.
+- Change availableBalance or lockedBalance.
+- Create another wallet.
+- Create a transfer ledger entry.
+=====================================================
+*/
+
+exports.updateMyDisplayCurrency = catchAsync(
+  async (req, res, next) => {
+    const userId = req.user._id;
+
+    let displayCurrency;
 
     try {
-      normalizedCurrency = normalizeCurrency(currency);
+      displayCurrency = normalizeCurrency(req.body.displayCurrency);
     } catch (error) {
       return next(error);
     }
 
-    /*
-    ---------------------------------------------------
-    Find the user's wallet
-    ---------------------------------------------------
-    */
-
-    let wallet = await getWalletForUser(userId, normalizedCurrency);
-
-    /*
-    ---------------------------------------------------
-    Create wallet if it doesn't exist
-    ---------------------------------------------------
-    */
+    let wallet = await getWalletForUser(userId);
 
     if (!wallet) {
-      wallet = await createWalletForUser(userId, normalizedCurrency);
+      wallet = await createWalletForUser(userId, displayCurrency);
     }
-
-    /*
-    ---------------------------------------------------
-    Safety check
-    ---------------------------------------------------
-    */
 
     if (!wallet) {
       return next(
+        new AppError("Unable to retrieve or create your wallet.", 500),
+      );
+    }
+
+    if (wallet.status === "closed") {
+      return next(
         new AppError(
-          `Unable to create or retrieve your ${normalizedCurrency} wallet.`,
-          500,
+          "Your wallet is closed. Its settings cannot be changed.",
+          403,
         ),
       );
     }
 
-    /*
-    ---------------------------------------------------
-    Return wallet
-    ---------------------------------------------------
-    */
+    // Save the preference only. Do not modify balances.
+    wallet.displayCurrency = displayCurrency;
+
+    await wallet.save();
 
     return res.status(200).json({
       status: "success",
-
+      message: "Display currency updated successfully.",
       data: {
         wallet: formatWallet(wallet),
       },
     });
-  }
+  },
+);
 
-  /*
-  ===================================================
-  GET ALL USER WALLETS
-  ===================================================
-  */
+/*
+=====================================================
+LEGACY CURRENCY CONVERSION ENDPOINT
+=====================================================
 
-  let wallets = await getWalletForUser(userId);
+Keep this export temporarily so an existing route
+that references convertWalletCurrency does not crash.
 
-  /*
-  ---------------------------------------------------
-  If no wallets exist, create default wallets
-  ---------------------------------------------------
+This no longer performs a financial conversion.
 
-  We intentionally create all supported wallets here
-  so the user can immediately see USD, NGN, CAD and EUR.
-  ---------------------------------------------------
-  */
+Legacy request:
+{
+  "fromCurrency": "USD",
+  "toCurrency": "NGN"
+}
 
-  if (!Array.isArray(wallets)) {
-    wallets = [];
-  }
+Only toCurrency is used as the display preference.
+New frontend code should use:
+PATCH /api/v1/wallets/display-currency
+=====================================================
+*/
 
-  /*
-  ---------------------------------------------------
-  If user has no wallets at all, create the default
-  currency wallets.
-  ---------------------------------------------------
-  */
+exports.convertWalletCurrency = catchAsync(
+  async (req, res, next) => {
+    const requestedCurrency =
+      req.body.displayCurrency || req.body.toCurrency;
 
-  if (wallets.length === 0) {
-    const currencies = SUPPORTED_CURRENCIES;
+    let displayCurrency;
 
-    wallets = [];
-
-    for (const walletCurrency of currencies) {
-      const wallet = await createWalletForUser(userId, walletCurrency);
-
-      if (wallet) {
-        wallets.push(wallet);
-      }
+    try {
+      displayCurrency = normalizeCurrency(requestedCurrency);
+    } catch (error) {
+      return next(error);
     }
-  }
 
-  /*
-  ---------------------------------------------------
-  RESPONSE
-  ---------------------------------------------------
-  */
+    const userId = req.user._id;
 
-  return res.status(200).json({
-    status: "success",
+    let wallet = await getWalletForUser(userId);
 
-    results: wallets.length,
+    if (!wallet) {
+      wallet = await createWalletForUser(userId, displayCurrency);
+    }
 
-    data: {
-      wallets: wallets.map(formatWallet),
-    },
-  });
-});
+    if (!wallet) {
+      return next(
+        new AppError("Unable to retrieve or create your wallet.", 500),
+      );
+    }
+
+    if (wallet.status === "closed") {
+      return next(
+        new AppError(
+          "Your wallet is closed. Its settings cannot be changed.",
+          403,
+        ),
+      );
+    }
+
+    wallet.displayCurrency = displayCurrency;
+
+    await wallet.save();
+
+    return res.status(200).json({
+      status: "success",
+      message:
+        "Display currency updated. Your wallet balance was not converted.",
+      data: {
+        wallet: formatWallet(wallet),
+      },
+    });
+  },
+);
 
 /*
 =====================================================
@@ -216,11 +296,14 @@ GET MY LEDGER
 GET /api/v1/wallets/ledger
 
 Optional query parameters:
-
 ?page=1
 ?limit=20
 ?type=DEPOSIT
-?currency=NGN
+?currency=USD
+
+Ledger currency represents the currency recorded on
+each transaction. Under the single-USD-wallet model,
+new wallet balance entries should use USD.
 =====================================================
 */
 
@@ -233,7 +316,10 @@ exports.getMyLedger = catchAsync(async (req, res, next) => {
 
   const page = Math.max(Number(req.query.page) || 1, 1);
 
-  const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+  const limit = Math.min(
+    Math.max(Number(req.query.limit) || 20, 1),
+    100,
+  );
 
   const skip = (page - 1) * limit;
 
@@ -249,12 +335,18 @@ exports.getMyLedger = catchAsync(async (req, res, next) => {
 
   /*
   ===================================================
-  LEDGER TYPE FILTER
+  TYPE FILTER
   ===================================================
   */
 
   if (req.query.type) {
-    filter.type = String(req.query.type).toUpperCase();
+    const type = String(req.query.type).trim().toUpperCase();
+
+    if (!/^[A-Z_]+$/.test(type)) {
+      return next(new AppError("Invalid ledger transaction type.", 400));
+    }
+
+    filter.type = type;
   }
 
   /*
@@ -264,30 +356,29 @@ exports.getMyLedger = catchAsync(async (req, res, next) => {
   */
 
   if (req.query.currency) {
-    let normalizedCurrency;
+    let currency;
 
     try {
-      normalizedCurrency = normalizeCurrency(req.query.currency);
+      currency = normalizeCurrency(req.query.currency);
     } catch (error) {
       return next(error);
     }
 
-    filter.currency = normalizedCurrency;
+    filter.currency = currency;
   }
 
   /*
   ===================================================
-  GET TRANSACTIONS + TOTAL
+  GET TRANSACTIONS AND COUNT
   ===================================================
   */
 
   const [transactions, total] = await Promise.all([
     LedgerEntry.find(filter)
-      .sort({
-        createdAt: -1,
-      })
+      .sort({ createdAt: -1, _id: -1 })
       .skip(skip)
-      .limit(limit),
+      .limit(limit)
+      .lean(),
 
     LedgerEntry.countDocuments(filter),
   ]);
@@ -316,224 +407,12 @@ exports.getMyLedger = catchAsync(async (req, res, next) => {
       page,
       limit,
       pages: totalPages,
-
       hasNextPage: page < totalPages,
-
       hasPreviousPage: page > 1,
     },
 
     data: {
       transactions,
-    },
-  });
-});
-
-/*
-=====================================================
-CONVERT WALLET CURRENCY
-=====================================================
-
-POST /api/v1/wallets/convert
-
-Body:
-{
-    "fromCurrency": "USD",
-    "toCurrency": "NGN"
-}
-
-Converts the source wallet's entire AVAILABLE balance.
-Locked funds are not converted.
-=====================================================
-*/
-
-exports.convertWalletCurrency = catchAsync(async (req, res, next) => {
-  const userId = req.user._id;
-
-  let fromCurrency;
-  let toCurrency;
-
-  try {
-    fromCurrency = normalizeCurrency(req.body.fromCurrency);
-    toCurrency = normalizeCurrency(req.body.toCurrency);
-  } catch (error) {
-    return next(error);
-  }
-
-  if (fromCurrency === toCurrency) {
-    return next(new AppError("Select a different target currency.", 400));
-  }
-
-  let exchange;
-
-  try {
-    exchange = await getExchangeRate(fromCurrency, toCurrency);
-  } catch (error) {
-    return next(
-      new AppError(
-        error.message || "Exchange rates are temporarily unavailable.",
-        503,
-      ),
-    );
-  }
-
-  const rate = new Decimal(exchange.rate);
-  const conversionReference = `FX-${randomUUID()}`;
-
-  const session = await mongoose.startSession();
-
-  let result;
-
-  try {
-    await session.withTransaction(async () => {
-      const sourceWallet = await Wallet.findOne({
-        user: userId,
-        currency: fromCurrency,
-      }).session(session);
-
-      if (!sourceWallet) {
-        throw new AppError(`Your ${fromCurrency} wallet was not found.`, 404);
-      }
-
-      if (sourceWallet.status !== "active") {
-        throw new AppError("Your source wallet is not active.", 403);
-      }
-
-      const sourceBalance = new Decimal(
-        sourceWallet.availableBalance?.toString() || "0",
-      );
-
-      if (!sourceBalance.isFinite() || sourceBalance.lte(0)) {
-        throw new AppError(
-          `Your ${fromCurrency} wallet has no available balance to convert.`,
-          400,
-        );
-      }
-
-      let targetWallet = await Wallet.findOne({
-        user: userId,
-        currency: toCurrency,
-      }).session(session);
-
-      if (targetWallet && targetWallet.status !== "active") {
-        throw new AppError("Your target wallet is not active.", 403);
-      }
-
-      if (!targetWallet) {
-        targetWallet = new Wallet({
-          user: userId,
-          currency: toCurrency,
-          availableBalance: "0",
-          lockedBalance: "0",
-          status: "active",
-        });
-      }
-
-      // All source available funds are converted.
-      // Target currency amounts are rounded down to 2 decimals.
-      const convertedAmount = sourceBalance
-        .mul(rate)
-        .toDecimalPlaces(2, Decimal.ROUND_DOWN);
-
-      if (convertedAmount.lte(0)) {
-        throw new AppError("The converted amount is too small to credit.", 400);
-      }
-
-      const targetBalanceBefore = new Decimal(
-        targetWallet.availableBalance?.toString() || "0",
-      );
-
-      const targetBalanceAfter = targetBalanceBefore.plus(convertedAmount);
-
-      // Debit source and credit target in one transaction.
-      sourceWallet.availableBalance = "0";
-      sourceWallet.lastTransactionAt = new Date();
-
-      targetWallet.availableBalance = targetBalanceAfter.toFixed(2);
-      targetWallet.lastTransactionAt = new Date();
-
-      await sourceWallet.save({ session });
-      await targetWallet.save({ session });
-
-      // Ledger entries are immutable: create a debit and a credit.
-      await LedgerEntry.create(
-        [
-          {
-            wallet: sourceWallet._id,
-            user: userId,
-            type: "TRANSFER",
-            direction: "DEBIT",
-            amount: sourceBalance.toFixed(),
-            currency: fromCurrency,
-            balanceAfter: "0",
-            reference: `${conversionReference}-DEBIT`,
-            description: `Currency conversion from ${fromCurrency} to ${toCurrency}`,
-            metadata: {
-              conversionReference,
-              fromCurrency,
-              toCurrency,
-              exchangeRate: rate.toString(),
-              convertedAmount: convertedAmount.toFixed(2),
-              side: "debit",
-              rateProvider: exchange.provider,
-              rateUpdatedAt: exchange.rateUpdatedAt,
-            },
-          },
-          {
-            wallet: targetWallet._id,
-            user: userId,
-            type: "TRANSFER",
-            direction: "CREDIT",
-            amount: convertedAmount.toFixed(2),
-            currency: toCurrency,
-            balanceAfter: targetBalanceAfter.toFixed(2),
-            reference: `${conversionReference}-CREDIT`,
-            description: `Currency conversion from ${fromCurrency} to ${toCurrency}`,
-            metadata: {
-              conversionReference,
-              fromCurrency,
-              toCurrency,
-              exchangeRate: rate.toString(),
-              sourceAmount: sourceBalance.toFixed(),
-              side: "credit",
-              rateProvider: exchange.provider,
-              rateUpdatedAt: exchange.rateUpdatedAt,
-            },
-          },
-        ],
-        { session },
-      );
-
-      result = {
-        reference: conversionReference,
-        fromCurrency,
-        toCurrency,
-        sourceAmount: sourceBalance.toFixed(),
-        convertedAmount: convertedAmount.toFixed(2),
-        exchangeRate: rate.toString(),
-        rateUpdatedAt: exchange.rateUpdatedAt,
-        sourceWallet: {
-          id: sourceWallet._id,
-          currency: fromCurrency,
-          availableBalance: "0",
-          lockedBalance: sourceWallet.lockedBalance?.toString() || "0",
-        },
-        targetWallet: {
-          id: targetWallet._id,
-          currency: toCurrency,
-          availableBalance: targetBalanceAfter.toFixed(2),
-          lockedBalance: targetWallet.lockedBalance?.toString() || "0",
-        },
-      };
-    });
-  } finally {
-    await session.endSession();
-  }
-
-  return res.status(200).json({
-    status: "success",
-    message: "Wallet currency converted successfully.",
-    data: {
-      conversion: result,
     },
   });
 });

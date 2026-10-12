@@ -1,9 +1,15 @@
 const mongoose = require("mongoose");
+const Decimal = require("decimal.js");
 
 const User = require("../models/UserModel");
 const LedgerEntry = require("../models/LedgerEntryModel");
 const Withdrawal = require("../models/WithdrawalModel");
 const Wallet = require("../models/WalletModel");
+const WalletReservation = require("../models/ReservationModel");
+
+const walletReservationService = require("../services/reservationService");
+const { getExchangeRate } = require("../services/exchangeRateServices");
+
 const catchAsync = require("../utils/catchAsync");
 const AppError = require("../utils/appError");
 
@@ -23,11 +29,20 @@ const MAXIMUM_WITHDRAWAL = {
   EUR: 50000,
 };
 
-/*
-=====================================================
-GENERATE WITHDRAWAL REFERENCE
-=====================================================
-*/
+const ACTIVE_WITHDRAWAL_STATUSES = [
+  "pending",
+  "under_review",
+  "approved",
+  "processing",
+];
+
+const WITHDRAWAL_STATUSES = [
+  ...ACTIVE_WITHDRAWAL_STATUSES,
+  "successful",
+  "rejected",
+  "failed",
+  "cancelled",
+];
 
 const generateWithdrawalReference = () => {
   const timestamp = Date.now();
@@ -35,12 +50,6 @@ const generateWithdrawalReference = () => {
 
   return `WD-${timestamp}-${random}`;
 };
-
-/*
-=====================================================
-VALIDATE MONEY AMOUNT
-=====================================================
-*/
 
 const validateAmount = (amount) => {
   if (amount === undefined || amount === null || amount === "") {
@@ -56,62 +65,57 @@ const validateAmount = (amount) => {
     );
   }
 
-  const numericValue = Number(value);
+  const decimal = new Decimal(value);
 
-  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+  if (!decimal.isFinite() || decimal.lte(0)) {
     throw new AppError("Withdrawal amount must be greater than zero.", 400);
   }
 
   return {
     stringValue: value,
-    numericValue,
+    decimal,
+    numericValue: decimal.toNumber(),
   };
 };
 
-const WITHDRAWAL_STATUSES = [
-  "pending",
-  "under_review",
-  "approved",
-  "processing",
-  "successful",
-  "rejected",
-  "failed",
-  "cancelled",
-];
+const toDecimal = (value) =>
+  new Decimal(value?.toString?.() ?? String(value ?? "0"));
 
-/*
-=====================================================
-MONEY HELPERS
-=====================================================
-*/
-
-/*
- * The wallet uses Decimal128.
- *
- * For the current wallet design we keep financial
- * calculations at 2 decimal places.
- */
-
-const decimalToCents = (value) => {
-  const stringValue = value?.toString?.() ?? String(value);
-
-  const [wholePart, decimalPart = ""] = stringValue.split(".");
-
-  const paddedDecimal = `${decimalPart}00`.slice(0, 2);
-
-  return BigInt(wholePart || "0") * 100n + BigInt(paddedDecimal || "0");
-};
-
-const centsToDecimal128 = (cents) => {
-  const negative = cents < 0n;
-  const absolute = negative ? -cents : cents;
-
-  const whole = absolute / 100n;
-  const decimal = absolute % 100n;
-
-  return mongoose.Types.Decimal128.fromString(
-    `${negative ? "-" : ""}${whole}.${decimal.toString().padStart(2, "0")}`,
+const toDecimal128 = (value) =>
+  mongoose.Types.Decimal128.fromString(
+    toDecimal(value).toDecimalPlaces(8, Decimal.ROUND_HALF_UP).toFixed(8),
   );
+
+const maskAccountNumber = (accountNumber) =>
+  accountNumber ? `******${String(accountNumber).slice(-4)}` : null;
+
+const convertPayoutToUsd = async (amount, currency) => {
+  const payoutAmount = toDecimal(amount);
+
+  if (currency === "USD") {
+    return payoutAmount.toDecimalPlaces(8, Decimal.ROUND_HALF_UP);
+  }
+
+  const exchange = await getExchangeRate(currency, "USD");
+
+  const rate = toDecimal(exchange?.rate);
+
+  if (!rate.isFinite() || rate.lte(0)) {
+    throw new AppError(
+      `Unable to obtain a valid ${currency} to USD exchange rate.`,
+      503,
+    );
+  }
+
+  const walletAmountUsd = payoutAmount
+    .mul(rate)
+    .toDecimalPlaces(8, Decimal.ROUND_UP);
+
+  if (!walletAmountUsd.isFinite() || walletAmountUsd.lte(0)) {
+    throw new AppError("Invalid USD withdrawal amount.", 400);
+  }
+
+  return walletAmountUsd;
 };
 
 /*
@@ -130,23 +134,11 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
     bankDetails,
   } = req.body;
 
-  /*
-    =================================================
-    VALIDATE CURRENCY
-    =================================================
-    */
-
   const normalizedCurrency = String(currency || "").toUpperCase();
 
   if (!SUPPORTED_CURRENCIES.includes(normalizedCurrency)) {
     return next(new AppError("Unsupported withdrawal currency.", 400));
   }
-
-  /*
-    =================================================
-    VALIDATE PAYOUT METHOD
-    =================================================
-    */
 
   if (payoutMethod !== "bank_transfer") {
     return next(
@@ -156,12 +148,6 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
       ),
     );
   }
-
-  /*
-    =================================================
-    VALIDATE AMOUNT
-    =================================================
-    */
 
   let validatedAmount;
 
@@ -173,12 +159,6 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
 
   const { stringValue, numericValue } = validatedAmount;
 
-  /*
-    =================================================
-    MINIMUM WITHDRAWAL
-    =================================================
-    */
-
   if (numericValue < MINIMUM_WITHDRAWAL[normalizedCurrency]) {
     return next(
       new AppError(
@@ -187,12 +167,6 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
       ),
     );
   }
-
-  /*
-    =================================================
-    MAXIMUM WITHDRAWAL
-    =================================================
-    */
 
   if (numericValue > MAXIMUM_WITHDRAWAL[normalizedCurrency]) {
     return next(
@@ -203,53 +177,30 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
     );
   }
 
-  /*
-    =================================================
-    VALIDATE BANK DETAILS
-    =================================================
-    */
-
-  if (!bankDetails) {
+  if (!bankDetails || typeof bankDetails !== "object") {
     return next(new AppError("Bank details are required.", 400));
   }
 
-  const { bankName, bankCode, accountName, accountNumber } = bankDetails;
+  const bankName = String(bankDetails.bankName || "").trim();
+  const bankCode = String(bankDetails.bankCode || "").trim();
+  const accountName = String(bankDetails.accountName || "").trim();
+  const accountNumber = String(bankDetails.accountNumber || "").trim();
 
-  if (!bankName?.trim()) {
-    return next(new AppError("Bank name is required.", 400));
+  if (!bankName || !bankCode || !accountName || !accountNumber) {
+    return next(
+      new AppError(
+        "Bank name, bank code, account name, and account number are required.",
+        400,
+      ),
+    );
   }
 
-  if (!bankCode?.trim()) {
-    return next(new AppError("Bank code is required.", 400));
-  }
-
-  if (!accountName?.trim()) {
-    return next(new AppError("Account name is required.", 400));
-  }
-
-  if (!accountNumber?.trim()) {
-    return next(new AppError("Account number is required.", 400));
-  }
-
-  /*
-    =================================================
-    FIND WALLET
-    =================================================
-    */
-
-  const wallet = await Wallet.findOne({
-    user: userId,
-  });
+  // A single wallet is used for all supported payout currencies.
+  const wallet = await Wallet.findOne({ user: userId });
 
   if (!wallet) {
     return next(new AppError("Wallet not found.", 404));
   }
-
-  /*
-    =================================================
-    WALLET STATUS
-    =================================================
-    */
 
   if (wallet.status !== "active") {
     return next(
@@ -260,44 +211,19 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
     );
   }
 
-  /*
-    =================================================
-    WALLET CURRENCY
-    =================================================
-    */
-
-  if (wallet.currency !== normalizedCurrency) {
+  if ((wallet.baseCurrency || wallet.currency) !== "USD") {
     return next(
       new AppError(
-        `Your wallet currency is ${wallet.currency}. You cannot make a ${normalizedCurrency} withdrawal.`,
+        "Your wallet must use USD accounting before withdrawals can be processed.",
         400,
       ),
     );
   }
 
-  /*
-    =================================================
-    CHECK BALANCE
-    =================================================
-    */
-
-  const availableBalance = Number(wallet.availableBalance.toString());
-
-  if (numericValue > availableBalance) {
-    return next(new AppError("Insufficient available balance.", 400));
-  }
-
-  /*
-    =================================================
-    PREVENT MULTIPLE ACTIVE WITHDRAWALS
-    =================================================
-    */
-
-  const existingWithdrawal = await Withdrawal.findOne({
+  // Prevent simultaneous active withdrawal requests.
+  const existingWithdrawal = await Withdrawal.exists({
     user: userId,
-    status: {
-      $in: ["pending", "under_review", "approved", "processing"],
-    },
+    status: { $in: ACTIVE_WITHDRAWAL_STATUSES },
   });
 
   if (existingWithdrawal) {
@@ -309,29 +235,36 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
     );
   }
 
-  /*
-    =================================================
-    START TRANSACTION
-    =================================================
-    */
+  // Calculate the USD amount before opening the transaction.
+  const walletAmountUsd = await convertPayoutToUsd(
+    stringValue,
+    normalizedCurrency,
+  );
 
+  const reference = generateWithdrawalReference();
   const session = await mongoose.startSession();
 
   try {
     let withdrawal;
 
     await session.withTransaction(async () => {
-      /*
-          =============================================
-          RELOAD WALLET INSIDE TRANSACTION
-          =============================================
-          */
+      // Recheck inside the transaction to reduce race conditions.
+      const currentWithdrawal = await Withdrawal.findOne({
+        user: userId,
+        status: { $in: ACTIVE_WITHDRAWAL_STATUSES },
+      }).session(session);
+
+      if (currentWithdrawal) {
+        throw new AppError(
+          "You already have a withdrawal request being processed.",
+          409,
+        );
+      }
 
       const currentWallet = await Wallet.findOne({
+        _id: wallet._id,
         user: userId,
-      })
-        .session(session)
-        .exec();
+      }).session(session);
 
       if (!currentWallet) {
         throw new AppError("Wallet not found.", 404);
@@ -341,103 +274,57 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
         throw new AppError("Your wallet is not active.", 403);
       }
 
-      if (currentWallet.currency !== normalizedCurrency) {
-        throw new AppError(
-          "Wallet currency does not match withdrawal currency.",
-          400,
-        );
+      if ((currentWallet.baseCurrency || currentWallet.currency) !== "USD") {
+        throw new AppError("Wallet accounting currency must be USD.", 400);
       }
-
-      /*
-          =============================================
-          CHECK BALANCE AGAIN
-          =============================================
-          */
-
-      const currentAvailable = Number(
-        currentWallet.availableBalance.toString(),
-      );
-
-      if (numericValue > currentAvailable) {
-        throw new AppError("Insufficient available balance.", 400);
-      }
-
-      /*
-          =============================================
-          MOVE FUNDS
-          =============================================
-          */
-
-      const currentLocked = Number(currentWallet.lockedBalance.toString());
-
-      const newAvailable = currentAvailable - numericValue;
-
-      const newLocked = currentLocked + numericValue;
-
-      currentWallet.availableBalance = mongoose.Types.Decimal128.fromString(
-        newAvailable.toFixed(8),
-      );
-
-      currentWallet.lockedBalance = mongoose.Types.Decimal128.fromString(
-        newLocked.toFixed(8),
-      );
-
-      currentWallet.lastTransactionAt = new Date();
-
-      await currentWallet.save({
-        session,
-      });
-
-      /*
-          =============================================
-          CREATE WITHDRAWAL
-          =============================================
-          */
-
-      const withdrawalReference = generateWithdrawalReference();
 
       const created = await Withdrawal.create(
         [
           {
             user: userId,
             wallet: currentWallet._id,
-
-            reference: withdrawalReference,
-
+            reference,
             provider: "manual",
 
+            // The amount the user expects to receive.
             amount: mongoose.Types.Decimal128.fromString(stringValue),
-
             currency: normalizedCurrency,
 
-            status: "pending",
+            // The amount deducted from the USD-based wallet.
+            walletAmountUsd: toDecimal128(walletAmountUsd),
 
+            status: "pending",
             payoutMethod,
 
             bankDetails: {
-              bankName: bankName.trim(),
-
-              bankCode: bankCode.trim(),
-
-              accountName: accountName.trim(),
-
-              accountNumber: accountNumber.trim(),
+              bankName,
+              bankCode,
+              accountName,
+              accountNumber,
             },
           },
         ],
-        {
-          session,
-        },
+        { session },
       );
 
       withdrawal = created[0];
-    });
 
-    /*
-      =================================================
-      RESPONSE
-      =================================================
-      */
+      // Reserve funds using the reservation service.
+      // This updates available/locked balances and creates
+      // the reservation within the same transaction.
+      await walletReservationService.reserveFunds({
+        session,
+        userId,
+        walletId: currentWallet._id,
+        reference,
+        amountUsd: walletAmountUsd.toFixed(8),
+        metadata: {
+          withdrawalId: withdrawal._id.toString(),
+          payoutCurrency: normalizedCurrency,
+          payoutAmount: stringValue,
+        },
+      });
+    });
 
     return res.status(201).json({
       status: "success",
@@ -448,6 +335,7 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
           reference: withdrawal.reference,
           amount: withdrawal.amount.toString(),
           currency: withdrawal.currency,
+          walletAmountUsd: withdrawal.walletAmountUsd.toString(),
           status: withdrawal.status,
           payoutMethod: withdrawal.payoutMethod,
           createdAt: withdrawal.createdAt,
@@ -1122,131 +1010,71 @@ REJECT WITHDRAWAL
 =====================================================
 */
 
-exports.rejectWithdrawal = async (req, res) => {
+exports.rejectWithdrawal = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+  const { rejectionReason } = req.body;
+
+  if (!mongoose.isValidObjectId(id)) {
+    return next(new AppError("Invalid withdrawal ID.", 400));
+  }
+
+  if (typeof rejectionReason !== "string" || !rejectionReason.trim()) {
+    return next(new AppError("Rejection reason is required.", 400));
+  }
+
   const session = await mongoose.startSession();
 
   try {
-    const { id } = req.params;
-    const { rejectionReason } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        status: "fail",
-        message: "Invalid withdrawal ID.",
-      });
-    }
-
-    if (!rejectionReason || !rejectionReason.trim()) {
-      return res.status(400).json({
-        status: "fail",
-        message: "Rejection reason is required.",
-      });
-    }
-
     let updatedWithdrawal;
 
     await session.withTransaction(async () => {
       const withdrawal = await Withdrawal.findById(id).session(session);
 
       if (!withdrawal) {
-        throw new Error("WITHDRAWAL_NOT_FOUND");
+        throw new AppError("Withdrawal not found.", 404);
       }
 
-      if (
-        withdrawal.status !== "pending" &&
-        withdrawal.status !== "under_review"
-      ) {
-        throw new Error(`INVALID_STATUS:${withdrawal.status}`);
+      if (!["pending", "under_review"].includes(withdrawal.status)) {
+        throw new AppError(
+          `Withdrawal cannot be rejected from "${withdrawal.status}" status.`,
+          400,
+        );
       }
 
-      if (withdrawal.ledgerEntry) {
-        throw new Error("WITHDRAWAL_ALREADY_SETTLED");
+      const reservation = await WalletReservation.findOne({
+        reference: withdrawal.reference,
+      }).session(session);
+
+      if (!reservation || reservation.status !== "held") {
+        throw new AppError(
+          "An active wallet reservation could not be found.",
+          409,
+        );
       }
 
-      const wallet = await Wallet.findById(withdrawal.wallet).session(session);
-
-      if (!wallet) {
-        throw new Error("WALLET_NOT_FOUND");
-      }
-
-      const amountCents = decimalToCents(withdrawal.amount);
-
-      const lockedCents = decimalToCents(wallet.lockedBalance);
-
-      if (lockedCents < amountCents) {
-        throw new Error("LOCKED_BALANCE_INSUFFICIENT");
-      }
-
-      /*
-       * Return locked money to available balance.
-       */
-
-      const availableCents = decimalToCents(wallet.availableBalance);
-
-      wallet.lockedBalance = centsToDecimal128(lockedCents - amountCents);
-
-      wallet.availableBalance = centsToDecimal128(availableCents + amountCents);
-
-      wallet.lastTransactionAt = new Date();
-
-      await wallet.save({ session });
+      await walletReservationService.releaseFunds({
+        session,
+        reference: withdrawal.reference,
+        reason: `Withdrawal rejected: ${rejectionReason.trim()}`,
+      });
 
       withdrawal.status = "rejected";
       withdrawal.rejectionReason = rejectionReason.trim();
       withdrawal.reviewedBy = req.user._id;
       withdrawal.reviewedAt = new Date();
 
-      await withdrawal.save({ session });
-
-      updatedWithdrawal = withdrawal;
+      updatedWithdrawal = await withdrawal.save({ session });
     });
 
     return res.status(200).json({
       status: "success",
-      message:
-        "Withdrawal rejected and funds returned to the user's available balance.",
-      data: updatedWithdrawal,
-    });
-  } catch (error) {
-    console.error("REJECT WITHDRAWAL ERROR:", error);
-
-    if (error.message === "WITHDRAWAL_NOT_FOUND") {
-      return res.status(404).json({
-        status: "fail",
-        message: "Withdrawal not found.",
-      });
-    }
-
-    if (error.message.startsWith("INVALID_STATUS:")) {
-      return res.status(400).json({
-        status: "fail",
-        message: `Withdrawal cannot be rejected from "${error.message.split(":")[1]}" status.`,
-      });
-    }
-
-    if (error.message === "LOCKED_BALANCE_INSUFFICIENT") {
-      return res.status(409).json({
-        status: "fail",
-        message:
-          "Wallet locked balance is insufficient to release this withdrawal.",
-      });
-    }
-
-    if (error.message === "WALLET_NOT_FOUND") {
-      return res.status(404).json({
-        status: "fail",
-        message: "Wallet not found.",
-      });
-    }
-
-    return res.status(500).json({
-      status: "error",
-      message: "Unable to reject withdrawal.",
+      message: "Withdrawal rejected and reserved funds released.",
+      data: { withdrawal: updatedWithdrawal },
     });
   } finally {
     await session.endSession();
   }
-};
+});
 
 /*
 =====================================================
@@ -1308,113 +1136,70 @@ MARK WITHDRAWAL SUCCESSFUL
 =====================================================
 */
 
-exports.markWithdrawalSuccessful = async (req, res) => {
+exports.markWithdrawalSuccessful = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+
+  if (!mongoose.isValidObjectId(id)) {
+    return next(new AppError("Invalid withdrawal ID.", 400));
+  }
+
   const session = await mongoose.startSession();
 
   try {
-    const { id } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        status: "fail",
-        message: "Invalid withdrawal ID.",
-      });
-    }
-
     let updatedWithdrawal;
 
     await session.withTransaction(async () => {
       const withdrawal = await Withdrawal.findById(id).session(session);
 
       if (!withdrawal) {
-        throw new Error("WITHDRAWAL_NOT_FOUND");
+        throw new AppError("Withdrawal not found.", 404);
       }
 
-      /*
-       * Idempotency:
-       *
-       * If this withdrawal has already been completed,
-       * don't debit the wallet again.
-       */
+      // Idempotency: do not consume the same reservation twice.
+      if (withdrawal.status === "successful") {
+        const reservation = await WalletReservation.findOne({
+          reference: withdrawal.reference,
+        }).session(session);
 
-      if (
-        withdrawal.status === "successful" &&
-        withdrawal.ledgerEntry &&
-        withdrawal.completedAt
-      ) {
-        updatedWithdrawal = withdrawal;
-        return;
+        if (
+          reservation?.status === "consumed" &&
+          withdrawal.ledgerEntry &&
+          withdrawal.completedAt
+        ) {
+          updatedWithdrawal = withdrawal;
+          return;
+        }
+
+        throw new AppError(
+          "Withdrawal is marked successful but its settlement records are inconsistent.",
+          409,
+        );
       }
 
       if (withdrawal.status !== "processing") {
-        throw new Error(`INVALID_STATUS:${withdrawal.status}`);
+        throw new AppError(
+          `Withdrawal cannot be completed from "${withdrawal.status}" status.`,
+          400,
+        );
       }
 
-      const wallet = await Wallet.findById(withdrawal.wallet).session(session);
-
-      if (!wallet) {
-        throw new Error("WALLET_NOT_FOUND");
-      }
-
-      const amountCents = decimalToCents(withdrawal.amount);
-
-      const lockedCents = decimalToCents(wallet.lockedBalance);
-
-      if (lockedCents < amountCents) {
-        throw new Error("LOCKED_BALANCE_INSUFFICIENT");
-      }
-
-      /*
-       * Remove the amount from locked balance.
-       */
-
-      const newLockedCents = lockedCents - amountCents;
-
-      wallet.lockedBalance = centsToDecimal128(newLockedCents);
-
-      wallet.lastTransactionAt = new Date();
-
-      /*
-       * The available balance was already reduced
-       * when the withdrawal was created.
-       *
-       * Therefore we DO NOT reduce availableBalance
-       * again here.
-       */
-
-      await wallet.save({ session });
-
-      /*
-       * Create immutable financial ledger entry.
-       */
-
-      const ledgerEntry = await LedgerEntry.create(
-        [
-          {
-            wallet: wallet._id,
-            user: withdrawal.user,
-            type: "WITHDRAWAL",
-            direction: "DEBIT",
-            amount: withdrawal.amount,
-            currency: withdrawal.currency,
-            balanceAfter: wallet.availableBalance,
-            reference: withdrawal.reference,
-            description: `Withdrawal ${withdrawal.reference} completed.`,
-            metadata: {
-              withdrawalId: withdrawal._id,
-              provider: withdrawal.provider,
-              providerReference: withdrawal.providerReference,
-              providerTransactionId: withdrawal.providerTransactionId,
-            },
-            immutable: true,
-          },
-        ],
-        { session },
-      );
+      const { ledgerEntry } = await walletReservationService.consumeFunds({
+        session,
+        reference: withdrawal.reference,
+        description: `Withdrawal ${withdrawal.reference} completed.`,
+        metadata: {
+          withdrawalId: withdrawal._id.toString(),
+          payoutCurrency: withdrawal.currency,
+          payoutAmount: withdrawal.amount.toString(),
+          provider: withdrawal.provider,
+          providerReference: withdrawal.providerReference || null,
+          providerTransactionId: withdrawal.providerTransactionId || null,
+        },
+      });
 
       withdrawal.status = "successful";
       withdrawal.completedAt = new Date();
-      withdrawal.ledgerEntry = ledgerEntry[0]._id;
+      withdrawal.ledgerEntry = ledgerEntry._id;
 
       if (!withdrawal.processedBy) {
         withdrawal.processedBy = req.user._id;
@@ -1424,55 +1209,18 @@ exports.markWithdrawalSuccessful = async (req, res) => {
         withdrawal.processedAt = new Date();
       }
 
-      updatedWithdrawal = await withdrawal.save({
-        session,
-      });
+      updatedWithdrawal = await withdrawal.save({ session });
     });
 
     return res.status(200).json({
       status: "success",
-      message: "Withdrawal marked as successful and ledger entry created.",
-      data: updatedWithdrawal,
-    });
-  } catch (error) {
-    console.error("MARK WITHDRAWAL SUCCESSFUL ERROR:", error);
-
-    if (error.message === "WITHDRAWAL_NOT_FOUND") {
-      return res.status(404).json({
-        status: "fail",
-        message: "Withdrawal not found.",
-      });
-    }
-
-    if (error.message.startsWith("INVALID_STATUS:")) {
-      return res.status(400).json({
-        status: "fail",
-        message: `Withdrawal cannot be completed from "${error.message.split(":")[1]}" status.`,
-      });
-    }
-
-    if (error.message === "WALLET_NOT_FOUND") {
-      return res.status(404).json({
-        status: "fail",
-        message: "Wallet not found.",
-      });
-    }
-
-    if (error.message === "LOCKED_BALANCE_INSUFFICIENT") {
-      return res.status(409).json({
-        status: "fail",
-        message: "Wallet locked balance is insufficient.",
-      });
-    }
-
-    return res.status(500).json({
-      status: "error",
-      message: "Unable to complete withdrawal.",
+      message: "Withdrawal completed and USD ledger debit recorded.",
+      data: { withdrawal: updatedWithdrawal },
     });
   } finally {
     await session.endSession();
   }
-};
+});
 
 /*
 =====================================================
@@ -1480,112 +1228,67 @@ CANCEL APPROVED WITHDRAWAL
 =====================================================
 */
 
-exports.cancelWithdrawal = async (req, res) => {
+exports.cancelWithdrawal = catchAsync(async (req, res, next) => {
+  const { id } = req.params;
+  const { reviewNote } = req.body;
+
+  if (!mongoose.isValidObjectId(id)) {
+    return next(new AppError("Invalid withdrawal ID.", 400));
+  }
+
   const session = await mongoose.startSession();
 
   try {
-    const { id } = req.params;
-    const { reviewNote } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        status: "fail",
-        message: "Invalid withdrawal ID.",
-      });
-    }
-
     let updatedWithdrawal;
 
     await session.withTransaction(async () => {
       const withdrawal = await Withdrawal.findById(id).session(session);
 
       if (!withdrawal) {
-        throw new Error("WITHDRAWAL_NOT_FOUND");
+        throw new AppError("Withdrawal not found.", 404);
       }
 
       if (withdrawal.status !== "approved") {
-        throw new Error(`INVALID_STATUS:${withdrawal.status}`);
+        throw new AppError(
+          `Withdrawal cannot be cancelled from "${withdrawal.status}" status.`,
+          400,
+        );
       }
 
-      const wallet = await Wallet.findById(withdrawal.wallet).session(session);
+      const reservation = await WalletReservation.findOne({
+        reference: withdrawal.reference,
+      }).session(session);
 
-      if (!wallet) {
-        throw new Error("WALLET_NOT_FOUND");
+      if (!reservation || reservation.status !== "held") {
+        throw new AppError(
+          "An active wallet reservation could not be found.",
+          409,
+        );
       }
 
-      const amountCents = decimalToCents(withdrawal.amount);
-
-      const lockedCents = decimalToCents(wallet.lockedBalance);
-
-      if (lockedCents < amountCents) {
-        throw new Error("LOCKED_BALANCE_INSUFFICIENT");
-      }
-
-      const availableCents = decimalToCents(wallet.availableBalance);
-
-      wallet.lockedBalance = centsToDecimal128(lockedCents - amountCents);
-
-      wallet.availableBalance = centsToDecimal128(availableCents + amountCents);
-
-      wallet.lastTransactionAt = new Date();
-
-      await wallet.save({ session });
+      await walletReservationService.releaseFunds({
+        session,
+        reference: withdrawal.reference,
+        reason: "Approved withdrawal cancelled by administrator",
+      });
 
       withdrawal.status = "cancelled";
       withdrawal.reviewedBy = req.user._id;
       withdrawal.reviewedAt = new Date();
 
-      if (reviewNote) {
-        withdrawal.reviewNote = reviewNote.trim();
+      if (typeof reviewNote === "string") {
+        withdrawal.reviewNote = reviewNote.trim() || null;
       }
 
-      updatedWithdrawal = await withdrawal.save({
-        session,
-      });
+      updatedWithdrawal = await withdrawal.save({ session });
     });
 
     return res.status(200).json({
       status: "success",
-      message:
-        "Withdrawal cancelled and funds returned to the available balance.",
-      data: updatedWithdrawal,
-    });
-  } catch (error) {
-    console.error("CANCEL WITHDRAWAL ERROR:", error);
-
-    if (error.message === "WITHDRAWAL_NOT_FOUND") {
-      return res.status(404).json({
-        status: "fail",
-        message: "Withdrawal not found.",
-      });
-    }
-
-    if (error.message.startsWith("INVALID_STATUS:")) {
-      return res.status(400).json({
-        status: "fail",
-        message: `Withdrawal cannot be cancelled from "${error.message.split(":")[1]}" status.`,
-      });
-    }
-
-    if (error.message === "WALLET_NOT_FOUND") {
-      return res.status(404).json({
-        status: "fail",
-        message: "Wallet not found.",
-      });
-    }
-
-    if (error.message === "LOCKED_BALANCE_INSUFFICIENT") {
-      return res.status(409).json({
-        status: "fail",
-        message: "Wallet locked balance is insufficient.",
-      });
-    }
-
-    return res.status(500).json({
-      status: "error",
-      message: "Unable to cancel withdrawal.",
+      message: "Withdrawal cancelled and reserved funds released.",
+      data: { withdrawal: updatedWithdrawal },
     });
   } finally {
     await session.endSession();
   }
-};
+});

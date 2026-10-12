@@ -1,13 +1,10 @@
 const mongoose = require("mongoose");
 
+const SUPPORTED_CURRENCIES = ["USD", "NGN", "CAD", "EUR"];
+
 const withdrawalSchema = new mongoose.Schema(
   {
-    /*
-    =====================================================
-    USER
-    =====================================================
-    */
-
+    // USER
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -15,12 +12,7 @@ const withdrawalSchema = new mongoose.Schema(
       index: true,
     },
 
-    /*
-    =====================================================
-    WALLET
-    =====================================================
-    */
-
+    // SINGLE USD-BASED WALLET
     wallet: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Wallet",
@@ -28,26 +20,15 @@ const withdrawalSchema = new mongoose.Schema(
       index: true,
     },
 
-    /*
-    =====================================================
-    WITHDRAWAL REFERENCE
-    =====================================================
-    */
-
+    // UNIQUE WITHDRAWAL REFERENCE
     reference: {
       type: String,
       required: true,
       unique: true,
       trim: true,
-      index: true,
     },
 
-    /*
-    =====================================================
-    PAYMENT PROVIDER
-    =====================================================
-    */
-
+    // PAYOUT PROVIDER
     provider: {
       type: String,
       enum: ["paystack", "flutterwave", "manual"],
@@ -61,7 +42,6 @@ const withdrawalSchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: null,
-      index: true,
     },
 
     providerTransactionId: {
@@ -70,30 +50,93 @@ const withdrawalSchema = new mongoose.Schema(
       default: null,
     },
 
-    /*
-    =====================================================
-    AMOUNT
-    =====================================================
-    */
-
+    // AMOUNT THE USER REQUESTED TO RECEIVE
     amount: {
       type: mongoose.Schema.Types.Decimal128,
       required: true,
+      validate: {
+        validator(value) {
+          const amount = Number(value.toString());
+          return Number.isFinite(amount) && amount > 0;
+        },
+        message: "Withdrawal amount must be greater than zero.",
+      },
     },
 
     currency: {
       type: String,
-      enum: ["USD", "NGN", "CAD", "EUR"],
+      enum: SUPPORTED_CURRENCIES,
       required: true,
       uppercase: true,
+      trim: true,
     },
 
-    /*
-    =====================================================
-    STATUS
-    =====================================================
-    */
+    // AMOUNT RESERVED FROM THE USD WALLET
+    walletAmountUsd: {
+      type: mongoose.Schema.Types.Decimal128,
+      required: true,
+      validate: {
+        validator(value) {
+          const amount = Number(value.toString());
+          return Number.isFinite(amount) && amount > 0;
+        },
+        message: "USD wallet reservation must be greater than zero.",
+      },
+    },
 
+    walletCurrency: {
+      type: String,
+      enum: ["USD"],
+      default: "USD",
+      required: true,
+    },
+
+    // FX SNAPSHOT
+    exchangeRate: {
+      type: mongoose.Schema.Types.Decimal128,
+      required: true,
+      validate: {
+        validator(value) {
+          const rate = Number(value.toString());
+          return Number.isFinite(rate) && rate > 0;
+        },
+        message: "Exchange rate must be greater than zero.",
+      },
+    },
+
+    exchangeRateUpdatedAt: {
+      type: Date,
+      default: null,
+    },
+
+    exchangeRateProvider: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+
+    // FEES, IF YOUR PAYOUT PROCESSOR CHARGES THEM
+    feeAmount: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: () => mongoose.Types.Decimal128.fromString("0"),
+    },
+
+    feeCurrency: {
+      type: String,
+      enum: SUPPORTED_CURRENCIES,
+      default: "USD",
+    },
+
+    // RESERVATION LIFECYCLE
+    reservationStatus: {
+      type: String,
+      enum: ["held", "released", "consumed"],
+      default: "held",
+      required: true,
+      index: true,
+    },
+
+    // WITHDRAWAL STATUS
     status: {
       type: String,
       enum: [
@@ -110,19 +153,17 @@ const withdrawalSchema = new mongoose.Schema(
       index: true,
     },
 
-    /*
-    =====================================================
-    DESTINATION / BANK DETAILS
-    =====================================================
-
-    Store only the information required to process
-    the withdrawal.
-    */
-
+    // PAYOUT DESTINATION
     payoutMethod: {
       type: String,
       enum: ["bank_transfer", "other"],
       default: "bank_transfer",
+    },
+
+    walletAmountUsd: {
+      type: mongoose.Schema.Types.Decimal128,
+      required: true,
+      min: 0,
     },
 
     bankDetails: {
@@ -132,21 +173,18 @@ const withdrawalSchema = new mongoose.Schema(
         maxlength: 200,
         default: null,
       },
-
       bankCode: {
         type: String,
         trim: true,
         maxlength: 50,
         default: null,
       },
-
       accountName: {
         type: String,
         trim: true,
         maxlength: 200,
         default: null,
       },
-
       accountNumber: {
         type: String,
         trim: true,
@@ -155,23 +193,16 @@ const withdrawalSchema = new mongoose.Schema(
       },
     },
 
-    /*
-    =====================================================
-    ADMIN REVIEW
-    =====================================================
-    */
-
+    // ADMIN REVIEW
     reviewedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       default: null,
     },
-
     reviewedAt: {
       type: Date,
       default: null,
     },
-
     reviewNote: {
       type: String,
       trim: true,
@@ -179,12 +210,7 @@ const withdrawalSchema = new mongoose.Schema(
       default: null,
     },
 
-    /*
-    =====================================================
-    REJECTION
-    =====================================================
-    */
-
+    // REJECTION
     rejectionReason: {
       type: String,
       trim: true,
@@ -192,12 +218,7 @@ const withdrawalSchema = new mongoose.Schema(
       default: null,
     },
 
-    /*
-    =====================================================
-    FAILURE
-    =====================================================
-    */
-
+    // FAILURE
     failureReason: {
       type: String,
       trim: true,
@@ -205,57 +226,35 @@ const withdrawalSchema = new mongoose.Schema(
       default: null,
     },
 
-    /*
-    =====================================================
-    PROCESSING
-    =====================================================
-    */
-
+    // PROCESSING
     processedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       default: null,
     },
-
     processedAt: {
       type: Date,
       default: null,
     },
 
-    /*
-    =====================================================
-    COMPLETION
-    =====================================================
-    */
-
+    // COMPLETION
     completedAt: {
       type: Date,
       default: null,
     },
 
-    /*
-    =====================================================
-    LEDGER
-    =====================================================
-    */
-
+    // FINAL ACCOUNTING ENTRY
     ledgerEntry: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "LedgerEntry",
       default: null,
     },
 
-    /*
-    =====================================================
-    PROVIDER RESPONSE
-    =====================================================
-
-    Keep this private from normal API responses.
-    */
-
+    // PRIVATE PROVIDER RESPONSE
     providerData: {
       type: mongoose.Schema.Types.Mixed,
       default: null,
+      select: false,
     },
   },
   {
@@ -263,50 +262,20 @@ const withdrawalSchema = new mongoose.Schema(
   },
 );
 
-/*
-=====================================================
-INDEXES
-=====================================================
-*/
+// QUERY INDEXES
+withdrawalSchema.index({ user: 1, createdAt: -1 });
+withdrawalSchema.index({ status: 1, createdAt: -1 });
+withdrawalSchema.index({ wallet: 1, createdAt: -1 });
+withdrawalSchema.index({ currency: 1, status: 1, createdAt: -1 });
 
-withdrawalSchema.index({
-  user: 1,
-  createdAt: -1,
-});
-
-withdrawalSchema.index({
-  status: 1,
-  createdAt: -1,
-});
-
-withdrawalSchema.index({
-  wallet: 1,
-  createdAt: -1,
-});
-
-withdrawalSchema.index({
-  currency: 1,
-  status: 1,
-  createdAt: -1,
-});
-
-/*
-=====================================================
-PROVIDER TRANSACTION UNIQUENESS
-=====================================================
-*/
-
+// Prevent duplicate provider transaction IDs.
+// Null/missing IDs are not subject to this unique index.
 withdrawalSchema.index(
-  {
-    provider: 1,
-    providerTransactionId: 1,
-  },
+  { provider: 1, providerTransactionId: 1 },
   {
     unique: true,
     partialFilterExpression: {
-      providerTransactionId: {
-        $type: "string",
-      },
+      providerTransactionId: { $type: "string" },
     },
   },
 );

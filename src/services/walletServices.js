@@ -5,25 +5,35 @@ const Wallet = require("../models/WalletModel");
 const LedgerEntry = require("../models/LedgerEntryModel");
 const AppError = require("../utils/appError");
 
-/*
-=====================================================
-SUPPORTED WALLET CURRENCIES
-=====================================================
-*/
-
+const BASE_CURRENCY = "USD";
 const SUPPORTED_CURRENCIES = ["USD", "NGN", "CAD", "EUR"];
+const WALLET_PRECISION = 8;
+
+const ALLOWED_LEDGER_TYPES = [
+  "DEPOSIT",
+  "WITHDRAWAL",
+  "TRADE",
+  "FEE",
+  "REFUND",
+  "BONUS",
+  "ADJUSTMENT",
+  "TRANSFER",
+];
 
 /*
 =====================================================
-NORMALIZE CURRENCY
+CURRENCY HELPERS
 =====================================================
 */
 
-const normalizeCurrency = (currency = "USD") => {
+const normalizeCurrency = (currency = BASE_CURRENCY) => {
   const normalized = String(currency).trim().toUpperCase();
 
   if (!SUPPORTED_CURRENCIES.includes(normalized)) {
-    throw new AppError(`Unsupported wallet currency: ${normalized}`, 400);
+    throw new AppError(
+      `Unsupported currency: ${normalized}. Supported currencies are USD, NGN, CAD and EUR.`,
+      400,
+    );
   }
 
   return normalized;
@@ -35,9 +45,6 @@ DECIMAL HELPERS
 =====================================================
 */
 
-/**
- * Convert any valid money value to Decimal.js.
- */
 const toDecimal = (value) => {
   try {
     const decimal = new Decimal(String(value));
@@ -47,25 +54,19 @@ const toDecimal = (value) => {
     }
 
     return decimal;
-  } catch (error) {
+  } catch {
     throw new AppError("Invalid monetary value.", 400);
   }
 };
 
-/**
- * Convert Decimal.js to MongoDB Decimal128.
- *
- * Wallet balances are stored with 8 decimal places.
- */
 const toDecimal128 = (value) => {
   const decimal = toDecimal(value);
 
-  return mongoose.Types.Decimal128.fromString(decimal.toFixed(8));
+  return mongoose.Types.Decimal128.fromString(
+    decimal.toFixed(WALLET_PRECISION, Decimal.ROUND_HALF_UP),
+  );
 };
 
-/**
- * Convert MongoDB Decimal128 to Decimal.js.
- */
 const fromDecimal128 = (value) => {
   if (value === undefined || value === null) {
     return new Decimal(0);
@@ -73,14 +74,11 @@ const fromDecimal128 = (value) => {
 
   try {
     return new Decimal(value.toString());
-  } catch (error) {
+  } catch {
     throw new AppError("Invalid stored monetary value.", 500);
   }
 };
 
-/**
- * Convert Decimal128 to string for API responses.
- */
 const decimalToString = (value) => {
   if (value === undefined || value === null) {
     return "0";
@@ -89,12 +87,6 @@ const decimalToString = (value) => {
   return value.toString();
 };
 
-/*
-=====================================================
-VALIDATE MONEY AMOUNT
-=====================================================
-*/
-
 const validateAmount = (amount) => {
   if (amount === undefined || amount === null || amount === "") {
     throw new AppError("Amount is required.", 400);
@@ -102,76 +94,69 @@ const validateAmount = (amount) => {
 
   const value = String(amount).trim();
 
-  /*
-  Only positive decimal numbers.
-
-  Allowed:
-  10
-  10.50
-  0.25
-
-  Rejected:
-  -10
-  abc
-  10.123456789
-  1,000
-  $100
-  */
-
   if (!/^\d+(\.\d+)?$/.test(value)) {
     throw new AppError("Invalid monetary amount.", 400);
   }
 
   const decimalPlaces = value.includes(".") ? value.split(".")[1].length : 0;
 
-  if (decimalPlaces > 8) {
+  if (decimalPlaces > WALLET_PRECISION) {
     throw new AppError(
-      "Amount cannot contain more than 8 decimal places.",
+      `Amount cannot contain more than ${WALLET_PRECISION} decimal places.`,
       400,
     );
   }
 
-  const decimalValue = new Decimal(value);
+  const decimal = new Decimal(value);
 
-  if (!decimalValue.isFinite() || decimalValue.lte(0)) {
+  if (!decimal.isFinite() || decimal.lte(0)) {
     throw new AppError("Amount must be greater than zero.", 400);
   }
 
-  return decimalValue;
+  return decimal;
+};
+
+const validateLedgerType = (type) => {
+  const normalized = String(type || "")
+    .trim()
+    .toUpperCase();
+
+  if (!ALLOWED_LEDGER_TYPES.includes(normalized)) {
+    throw new AppError(
+      `Invalid ledger transaction type: ${normalized || "missing"}.`,
+      400,
+    );
+  }
+
+  return normalized;
 };
 
 /*
 =====================================================
-VALIDATE LEDGER TYPE
+BASE CURRENCY VALIDATION
+=====================================================
+
+Wallet balances are ALWAYS USD.
+
+NGN, CAD and EUR are display or payment currencies,
+not wallet balance currencies.
+
+Convert confirmed non-USD payments to USD in the
+deposit service before calling creditWallet().
 =====================================================
 */
 
-const allowedLedgerTypes = [
-  "DEPOSIT",
-  "WITHDRAWAL",
-  "TRADE",
-  "FEE",
-  "REFUND",
-  "BONUS",
-  "ADJUSTMENT",
-  "TRANSFER",
-];
+const requireBaseCurrency = (currency = BASE_CURRENCY) => {
+  const normalized = normalizeCurrency(currency);
 
-const validateLedgerType = (type) => {
-  if (!type) {
-    throw new AppError("Ledger transaction type is required.", 400);
-  }
-
-  const normalizedType = String(type).trim().toUpperCase();
-
-  if (!allowedLedgerTypes.includes(normalizedType)) {
+  if (normalized !== BASE_CURRENCY) {
     throw new AppError(
-      `Invalid ledger transaction type: ${normalizedType}`,
+      `Wallet balance operations must use ${BASE_CURRENCY}. Convert the transaction amount to USD before modifying the wallet.`,
       400,
     );
   }
 
-  return normalizedType;
+  return BASE_CURRENCY;
 };
 
 /*
@@ -179,27 +164,27 @@ const validateLedgerType = (type) => {
 GET ACTIVE WALLET
 =====================================================
 
-A user can have:
+Returns the user's ONE wallet.
 
-USER + USD
-USER + NGN
-USER + CAD
-USER + EUR
-
-Therefore currency is always part of the lookup.
+The optional currency argument is retained for
+backward compatibility, but cannot select a separate
+currency wallet. Non-USD balance operations are rejected.
 =====================================================
 */
 
-const getActiveWallet = async (userId, currency = "USD", session = null) => {
+const getActiveWallet = async (
+  userId,
+  currency = BASE_CURRENCY,
+  session = null,
+) => {
   if (!userId) {
     throw new AppError("User ID is required.", 400);
   }
 
-  const normalizedCurrency = normalizeCurrency(currency);
+  requireBaseCurrency(currency);
 
   const query = Wallet.findOne({
     user: userId,
-    currency: normalizedCurrency,
   });
 
   if (session) {
@@ -209,22 +194,26 @@ const getActiveWallet = async (userId, currency = "USD", session = null) => {
   const wallet = await query;
 
   if (!wallet) {
-    throw new AppError(`${normalizedCurrency} wallet not found.`, 404);
-  }
-
-  if (wallet.status === "frozen") {
-    throw new AppError(
-      `Your ${normalizedCurrency} wallet is currently frozen.`,
-      403,
-    );
-  }
-
-  if (wallet.status === "closed") {
-    throw new AppError(`Your ${normalizedCurrency} wallet is closed.`, 403);
+    throw new AppError("Your wallet was not found.", 404);
   }
 
   if (wallet.status !== "active") {
-    throw new AppError(`${normalizedCurrency} wallet is not active.`, 403);
+    if (wallet.status === "frozen") {
+      throw new AppError("Your wallet is currently frozen.", 403);
+    }
+
+    if (wallet.status === "closed") {
+      throw new AppError("Your wallet is closed.", 403);
+    }
+
+    throw new AppError("Your wallet is not active.", 403);
+  }
+
+  if (wallet.baseCurrency !== BASE_CURRENCY) {
+    throw new AppError(
+      "Wallet base currency is invalid. Please contact support.",
+      500,
+    );
   }
 
   return wallet;
@@ -232,48 +221,35 @@ const getActiveWallet = async (userId, currency = "USD", session = null) => {
 
 /*
 =====================================================
-CREATE WALLET FOR USER
+CREATE OR RETRIEVE ONE WALLET
 =====================================================
 
-Creates one wallet for:
+createWalletForUser(userId, "NGN") creates a wallet
+whose display currency is NGN, NOT an NGN balance.
 
-USER + CURRENCY
-
-Example:
-
-User A + USD
-User A + NGN
-User A + CAD
-User A + EUR
-
+Existing callers can continue passing a supported
+currency as their second argument.
 =====================================================
 */
 
-const createWalletForUser = async (userId, currency = "USD") => {
+const createWalletForUser = async (userId, displayCurrency = BASE_CURRENCY) => {
   if (!userId) {
     throw new AppError("User ID is required to create a wallet.", 400);
   }
 
-  const normalizedCurrency = normalizeCurrency(currency);
+  const normalizedDisplayCurrency = normalizeCurrency(displayCurrency);
 
-  /*
-  Check whether this specific currency wallet
-  already exists.
-  */
+  let wallet = await Wallet.findOne({ user: userId });
 
-  const existingWallet = await Wallet.findOne({
-    user: userId,
-    currency: normalizedCurrency,
-  });
-
-  if (existingWallet) {
-    return existingWallet;
+  if (wallet) {
+    return wallet;
   }
 
   try {
-    const wallet = await Wallet.create({
+    wallet = await Wallet.create({
       user: userId,
-      currency: normalizedCurrency,
+      baseCurrency: BASE_CURRENCY,
+      displayCurrency: normalizedDisplayCurrency,
       availableBalance: toDecimal128("0"),
       lockedBalance: toDecimal128("0"),
       status: "active",
@@ -281,26 +257,9 @@ const createWalletForUser = async (userId, currency = "USD") => {
 
     return wallet;
   } catch (error) {
-    /*
-    -------------------------------------------------
-    DUPLICATE WALLET RACE CONDITION
-    -------------------------------------------------
-
-    Two requests may attempt to create the same wallet
-    at exactly the same time.
-
-    The unique compound index:
-
-    user + currency
-
-    protects against this.
-    */
-
+    // Recover when concurrent requests create the same wallet.
     if (error.code === 11000) {
-      const wallet = await Wallet.findOne({
-        user: userId,
-        currency: normalizedCurrency,
-      });
+      wallet = await Wallet.findOne({ user: userId });
 
       if (wallet) {
         return wallet;
@@ -313,37 +272,21 @@ const createWalletForUser = async (userId, currency = "USD") => {
 
 /*
 =====================================================
-CREATE DEFAULT WALLETS
+CREATE DEFAULT WALLET
 =====================================================
 
-Creates:
+Kept under the old function name so existing signup
+code does not have to change immediately.
 
-USD
-NGN
-CAD
-EUR
-
-for the user.
-
-This can be called after signup.
-
+It now creates exactly ONE USD wallet.
 =====================================================
 */
 
 const createDefaultWalletsForUser = async (userId) => {
-  if (!userId) {
-    throw new AppError("User ID is required.", 400);
-  }
+  const wallet = await createWalletForUser(userId, BASE_CURRENCY);
 
-  const wallets = [];
-
-  for (const currency of SUPPORTED_CURRENCIES) {
-    const wallet = await createWalletForUser(userId, currency);
-
-    wallets.push(wallet);
-  }
-
-  return wallets;
+  // Return an array for compatibility with older signup code.
+  return [wallet];
 };
 
 /*
@@ -351,20 +294,10 @@ const createDefaultWalletsForUser = async (userId) => {
 GET WALLET FOR USER
 =====================================================
 
-If currency is supplied:
+Always returns one wallet document or null.
 
-    returns ONE wallet.
-
-Example:
-getWalletForUser(userId, "NGN")
-
-If currency is not supplied:
-
-    returns ALL wallets.
-
-Example:
-getWalletForUser(userId)
-
+The optional currency parameter is retained for
+compatibility, but never selects another wallet.
 =====================================================
 */
 
@@ -373,37 +306,22 @@ const getWalletForUser = async (userId, currency = null) => {
     throw new AppError("User ID is required.", 400);
   }
 
-  /*
-  -------------------------------------------------
-  SPECIFIC CURRENCY
-  -------------------------------------------------
-  */
-
-  if (currency) {
-    const normalizedCurrency = normalizeCurrency(currency);
-
-    return Wallet.findOne({
-      user: userId,
-      currency: normalizedCurrency,
-    });
+  if (currency !== null && currency !== undefined) {
+    normalizeCurrency(currency);
   }
 
-  /*
-  -------------------------------------------------
-  ALL CURRENCY WALLETS
-  -------------------------------------------------
-  */
-
-  return Wallet.find({
-    user: userId,
-  }).sort({
-    currency: 1,
-  });
+  return Wallet.findOne({ user: userId });
 };
 
 /*
 =====================================================
 CREATE LEDGER ENTRY
+=====================================================
+
+The ledger records the actual wallet balance movement
+in USD. Original payment and payout currencies, rates,
+and external references belong in metadata or dedicated
+transaction fields.
 =====================================================
 */
 
@@ -423,28 +341,25 @@ const createLedgerEntry = async ({
     throw new AppError("Wallet is required to create a ledger entry.", 500);
   }
 
+  if (!["CREDIT", "DEBIT"].includes(direction)) {
+    throw new AppError("Invalid ledger direction.", 400);
+  }
+
   const entryData = {
     wallet: wallet._id,
     user: userId,
-    type,
+    type: validateLedgerType(type),
     direction,
     amount: toDecimal128(amount),
-    currency: wallet.currency,
+    currency: BASE_CURRENCY,
     balanceAfter: toDecimal128(balanceAfter),
     reference,
     description,
     metadata,
   };
 
-  /*
-  Use create with session when inside a transaction.
-  */
-
   if (session) {
-    const [entry] = await LedgerEntry.create([entryData], {
-      session,
-    });
-
+    const [entry] = await LedgerEntry.create([entryData], { session });
     return entry;
   }
 
@@ -453,34 +368,43 @@ const createLedgerEntry = async ({
 
 /*
 =====================================================
+VERIFY IDEMPOTENT CREDIT
+=====================================================
+*/
+
+const verifyExistingCredit = async ({ entry, userId, amount, type }) => {
+  if (
+    entry.direction !== "CREDIT" ||
+    String(entry.user) !== String(userId) ||
+    String(entry.currency).toUpperCase() !== BASE_CURRENCY ||
+    entry.type !== type ||
+    !fromDecimal128(entry.amount).eq(amount)
+  ) {
+    throw new AppError(
+      "This financial reference has already been used for a different transaction.",
+      409,
+    );
+  }
+
+  const wallet = await Wallet.findById(entry.wallet);
+
+  return {
+    wallet,
+    ledgerEntry: entry,
+    alreadyProcessed: true,
+  };
+};
+
+/*
+=====================================================
 CREDIT WALLET
 =====================================================
 
-IDEMPOTENT FINANCIAL CREDIT
+The reference must be unique and stable across retries.
 
-A financial reference is treated as an idempotency key.
-
-Example:
-
-reference = DEP-ABC123
-
-First call:
-    wallet + amount
-    ledger entry created
-
-Second call:
-    existing ledger entry found
-    wallet is NOT credited again
-
-This protects against:
-
-- Double admin approval
-- Duplicate API requests
-- Browser retries
-- Network retries
-- Server recovery after partial completion
-- Accidental repeated processing
-
+IMPORTANT:
+amount is the USD amount to credit, not the original
+NGN, CAD or EUR payment amount.
 =====================================================
 */
 
@@ -488,33 +412,30 @@ const creditWallet = async ({
   userId,
   amount,
   type,
-  currency = "USD",
+  currency = BASE_CURRENCY,
   reference = null,
   description = null,
   metadata = {},
 }) => {
   const validatedAmount = validateAmount(amount);
-
   const ledgerType = validateLedgerType(type);
 
-  const normalizedCurrency = normalizeCurrency(currency);
+  requireBaseCurrency(currency);
 
   const normalizedReference =
     reference === null || reference === undefined
-      ? null
+      ? ""
       : String(reference).trim();
-
-  /*
-  =====================================================
-  FINANCIAL CREDITS MUST HAVE A REFERENCE
-  =====================================================
-  */
 
   if (!normalizedReference) {
     throw new AppError(
       "A unique financial reference is required for wallet credit.",
-      400
+      400,
     );
+  }
+
+  if (!userId) {
+    throw new AppError("User ID is required.", 400);
   }
 
   const session = await mongoose.startSession();
@@ -522,211 +443,87 @@ const creditWallet = async ({
   try {
     let result;
 
-    try {
-      await session.withTransaction(async () => {
-        /*
-        ================================================
-        1. IDEMPOTENCY CHECK
-        ================================================
-        */
+    await session.withTransaction(async () => {
+      const existingEntry = await LedgerEntry.findOne({
+        reference: normalizedReference,
+      }).session(session);
 
-        const existingLedgerEntry =
-          await LedgerEntry.findOne({
-            reference: normalizedReference,
-          }).session(session);
-
-        if (existingLedgerEntry) {
-          /*
-          -----------------------------------------------
-          VERIFY EXISTING TRANSACTION
-          -----------------------------------------------
-          */
-
-          if (existingLedgerEntry.direction !== "CREDIT") {
-            throw new AppError(
-              `Financial reference ${normalizedReference} has already been used by a non-credit transaction.`,
-              409
-            );
-          }
-
-          if (
-            existingLedgerEntry.amount?.toString() !==
-              validatedAmount.toString() ||
-            String(existingLedgerEntry.currency).toUpperCase() !==
-              normalizedCurrency ||
-            String(existingLedgerEntry.user) !== String(userId)
-          ) {
-            throw new AppError(
-              "This financial reference has already been used for a different transaction.",
-              409
-            );
-          }
-
-          /*
-          -----------------------------------------------
-          ALREADY PROCESSED
-          -----------------------------------------------
-          */
-
-          const wallet = await Wallet.findById(
-            existingLedgerEntry.wallet
-          ).session(session);
-
-          result = {
-            wallet,
-            ledgerEntry: existingLedgerEntry,
-            alreadyProcessed: true,
-          };
-
-          return;
-        }
-
-        /*
-        ================================================
-        2. GET ACTIVE WALLET
-        ================================================
-        */
-
-        const wallet = await getActiveWallet(
-          userId,
-          normalizedCurrency,
-          session
-        );
-
-        /*
-        ================================================
-        3. CALCULATE NEW BALANCE
-        ================================================
-        */
-
-        const currentBalance = fromDecimal128(
-          wallet.availableBalance
-        );
-
-        const newBalance = currentBalance.plus(
-          validatedAmount
-        );
-
-        /*
-        ================================================
-        4. UPDATE WALLET
-        ================================================
-        */
-
-        wallet.availableBalance =
-          toDecimal128(newBalance);
-
-        wallet.lastTransactionAt = new Date();
-
-        await wallet.save({
-          session,
-        });
-
-        /*
-        ================================================
-        5. CREATE LEDGER ENTRY
-        ================================================
-        */
-
-        const ledgerEntry = await createLedgerEntry({
-          wallet,
-          userId,
-          type: ledgerType,
-          direction: "CREDIT",
-          amount: validatedAmount,
-          balanceAfter: newBalance,
-          reference: normalizedReference,
-          description,
-          metadata,
-          session,
-        });
-
-        /*
-        ================================================
-        6. RETURN NEW RESULT
-        ================================================
-        */
-
-        result = {
-          wallet,
-          ledgerEntry,
-          alreadyProcessed: false,
-        };
-      });
-
-      /*
-      Transaction completed normally.
-      */
-
-      return result;
-    } catch (error) {
-      /*
-      =================================================
-      DUPLICATE REFERENCE RACE RECOVERY
-      =================================================
-
-      Another request may have successfully committed
-      the same financial reference while this request
-      was running.
-
-      The unique ledger index causes this transaction
-      to fail.
-
-      We then look up the committed transaction AFTER
-      the transaction has ended.
-      =================================================
-      */
-
-      if (error.code === 11000) {
-        const existingLedgerEntry =
-          await LedgerEntry.findOne({
-            reference: normalizedReference,
-          });
-
-        if (!existingLedgerEntry) {
-          throw error;
-        }
-
-        /*
-        Verify that the existing transaction matches
-        the request.
-        */
-
+      if (existingEntry) {
         if (
-          existingLedgerEntry.direction !== "CREDIT"
-        ) {
-          throw new AppError(
-            `Financial reference ${normalizedReference} has already been used by a non-credit transaction.`,
-            409
-          );
-        }
-
-        if (
-          existingLedgerEntry.amount?.toString() !==
-            validatedAmount.toString() ||
-          String(existingLedgerEntry.currency).toUpperCase() !==
-            normalizedCurrency ||
-          String(existingLedgerEntry.user) !== String(userId)
+          existingEntry.direction !== "CREDIT" ||
+          String(existingEntry.user) !== String(userId) ||
+          String(existingEntry.currency).toUpperCase() !== BASE_CURRENCY ||
+          existingEntry.type !== ledgerType ||
+          !fromDecimal128(existingEntry.amount).eq(validatedAmount)
         ) {
           throw new AppError(
             "This financial reference has already been used for a different transaction.",
-            409
+            409,
           );
         }
 
-        const wallet = await Wallet.findById(
-          existingLedgerEntry.wallet
-        );
+        const existingWallet = await Wallet.findById(
+          existingEntry.wallet,
+        ).session(session);
 
-        return {
-          wallet,
-          ledgerEntry: existingLedgerEntry,
+        result = {
+          wallet: existingWallet,
+          ledgerEntry: existingEntry,
           alreadyProcessed: true,
         };
+
+        return;
       }
 
-      throw error;
+      const wallet = await getActiveWallet(userId, BASE_CURRENCY, session);
+
+      const currentBalance = fromDecimal128(wallet.availableBalance);
+      const newBalance = currentBalance.plus(validatedAmount);
+
+      wallet.availableBalance = toDecimal128(newBalance);
+      wallet.lastTransactionAt = new Date();
+
+      await wallet.save({ session });
+
+      const ledgerEntry = await createLedgerEntry({
+        wallet,
+        userId,
+        type: ledgerType,
+        direction: "CREDIT",
+        amount: validatedAmount,
+        balanceAfter: newBalance,
+        reference: normalizedReference,
+        description,
+        metadata,
+        session,
+      });
+
+      result = {
+        wallet,
+        ledgerEntry,
+        alreadyProcessed: false,
+      };
+    });
+
+    return result;
+  } catch (error) {
+    // A unique reference index can detect a concurrent duplicate.
+    if (error.code === 11000) {
+      const existingEntry = await LedgerEntry.findOne({
+        reference: normalizedReference,
+      });
+
+      if (existingEntry) {
+        return verifyExistingCredit({
+          entry: existingEntry,
+          userId,
+          amount: validatedAmount,
+          type: ledgerType,
+        });
+      }
     }
+
+    throw error;
   } finally {
     await session.endSession();
   }
@@ -737,46 +534,70 @@ const creditWallet = async ({
 DEBIT WALLET
 =====================================================
 
-Examples:
+All debits are denominated in USD.
 
-WITHDRAWAL
-TRADE
-FEE
-TRANSFER
-
+Use a unique reference for every financial operation.
 =====================================================
 */
 
 const debitWallet = async ({
   userId,
   amount,
-  currency = "USD",
+  currency = BASE_CURRENCY,
   type,
   reference = null,
   description = null,
   metadata = {},
 }) => {
   const validatedAmount = validateAmount(amount);
-
   const ledgerType = validateLedgerType(type);
 
-  const normalizedCurrency = normalizeCurrency(currency);
+  requireBaseCurrency(currency);
 
+  if (!userId) {
+    throw new AppError("User ID is required.", 400);
+  }
+
+  if (!reference || !String(reference).trim()) {
+    throw new AppError("A financial reference is required for debit.", 400);
+  }
+
+  const normalizedReference = String(reference).trim();
   const session = await mongoose.startSession();
 
   try {
     let result;
 
     await session.withTransaction(async () => {
-      const wallet = await getActiveWallet(userId, normalizedCurrency, session);
+      const existingEntry = await LedgerEntry.findOne({
+        reference: normalizedReference,
+      }).session(session);
 
+      if (existingEntry) {
+        if (
+          existingEntry.direction !== "DEBIT" ||
+          String(existingEntry.user) !== String(userId) ||
+          String(existingEntry.currency).toUpperCase() !== BASE_CURRENCY ||
+          existingEntry.type !== ledgerType ||
+          !fromDecimal128(existingEntry.amount).eq(validatedAmount)
+        ) {
+          throw new AppError(
+            "This financial reference has already been used for a different transaction.",
+            409,
+          );
+        }
+
+        result = {
+          wallet: await Wallet.findById(existingEntry.wallet).session(session),
+          ledgerEntry: existingEntry,
+          alreadyProcessed: true,
+        };
+
+        return;
+      }
+
+      const wallet = await getActiveWallet(userId, BASE_CURRENCY, session);
       const currentBalance = fromDecimal128(wallet.availableBalance);
-
-      /*
-        -------------------------------------------------
-        INSUFFICIENT BALANCE
-        -------------------------------------------------
-        */
 
       if (currentBalance.lt(validatedAmount)) {
         throw new AppError("Insufficient available wallet balance.", 400);
@@ -785,12 +606,9 @@ const debitWallet = async ({
       const newBalance = currentBalance.minus(validatedAmount);
 
       wallet.availableBalance = toDecimal128(newBalance);
-
       wallet.lastTransactionAt = new Date();
 
-      await wallet.save({
-        session,
-      });
+      await wallet.save({ session });
 
       const ledgerEntry = await createLedgerEntry({
         wallet,
@@ -799,7 +617,7 @@ const debitWallet = async ({
         direction: "DEBIT",
         amount: validatedAmount,
         balanceAfter: newBalance,
-        reference,
+        reference: normalizedReference,
         description,
         metadata,
         session,
@@ -808,6 +626,7 @@ const debitWallet = async ({
       result = {
         wallet,
         ledgerEntry,
+        alreadyProcessed: false,
       };
     });
 
@@ -822,51 +641,49 @@ const debitWallet = async ({
 RESERVE WALLET FUNDS
 =====================================================
 
-Moves:
+Moves USD from availableBalance to lockedBalance.
 
-AVAILABLE
-    ↓
-LOCKED
-
-Examples:
-
-- Pending withdrawal
-- Trading order margin
-- Other financial reservation
-
+A reference should identify the specific reservation.
 =====================================================
 */
 
 const reserveWalletFunds = async ({
   userId,
   amount,
-  currency = "USD",
+  currency = BASE_CURRENCY,
   type = "TRADE",
   reference = null,
   description = null,
   metadata = {},
 }) => {
   const validatedAmount = validateAmount(amount);
-
-  /*
-  Validate type even though no ledger entry
-  is currently created.
-  */
-
   validateLedgerType(type);
+  requireBaseCurrency(currency);
 
-  const normalizedCurrency = normalizeCurrency(currency);
+  if (!reference || !String(reference).trim()) {
+    throw new AppError("A reservation reference is required.", 400);
+  }
 
+  const normalizedReference = String(reference).trim();
   const session = await mongoose.startSession();
 
   try {
     let result;
 
     await session.withTransaction(async () => {
-      const wallet = await getActiveWallet(userId, normalizedCurrency, session);
+      const existing = await LedgerEntry.findOne({
+        reference: normalizedReference,
+      }).session(session);
 
+      if (existing) {
+        throw new AppError(
+          "This reference has already been used. Reservation retries require a dedicated reservation record.",
+          409,
+        );
+      }
+
+      const wallet = await getActiveWallet(userId, BASE_CURRENCY, session);
       const available = fromDecimal128(wallet.availableBalance);
-
       const locked = fromDecimal128(wallet.lockedBalance);
 
       if (available.lt(validatedAmount)) {
@@ -874,44 +691,20 @@ const reserveWalletFunds = async ({
       }
 
       const newAvailable = available.minus(validatedAmount);
-
       const newLocked = locked.plus(validatedAmount);
 
       wallet.availableBalance = toDecimal128(newAvailable);
-
       wallet.lockedBalance = toDecimal128(newLocked);
-
       wallet.lastTransactionAt = new Date();
 
-      await wallet.save({
-        session,
-      });
-
-      /*
-        -------------------------------------------------
-        IMPORTANT
-        -------------------------------------------------
-
-        Reservation does not create or destroy money.
-
-        It only moves money:
-
-        AVAILABLE → LOCKED
-
-        Therefore no normal CREDIT/DEBIT ledger
-        entry is created here.
-
-        reference, description and metadata are retained
-        in the function interface so the caller can use
-        them when a dedicated reservation model is added.
-        -------------------------------------------------
-        */
+      await wallet.save({ session });
 
       result = {
         wallet,
-        availableBalance: newAvailable.toFixed(8),
-        lockedBalance: newLocked.toFixed(8),
-        currency: wallet.currency,
+        availableBalance: newAvailable.toFixed(WALLET_PRECISION),
+        lockedBalance: newLocked.toFixed(WALLET_PRECISION),
+        currency: BASE_CURRENCY,
+        reference: normalizedReference,
       };
     });
 
@@ -926,41 +719,38 @@ const reserveWalletFunds = async ({
 RELEASE RESERVED FUNDS
 =====================================================
 
-Moves:
+Moves USD from lockedBalance back to availableBalance.
 
-LOCKED
-    ↓
-AVAILABLE
-
-Example:
-
-A withdrawal is cancelled.
-
+Call this only once for a confirmed cancellation or
+release. A production withdrawal/trade workflow should
+persist reservation state and make release idempotent.
 =====================================================
 */
 
 const releaseReservedFunds = async ({
   userId,
   amount,
-  currency = "USD",
+  currency = BASE_CURRENCY,
   reference = null,
   description = null,
   metadata = {},
 }) => {
   const validatedAmount = validateAmount(amount);
+  requireBaseCurrency(currency);
 
-  const normalizedCurrency = normalizeCurrency(currency);
+  if (!reference || !String(reference).trim()) {
+    throw new AppError("A release reference is required.", 400);
+  }
 
+  const normalizedReference = String(reference).trim();
   const session = await mongoose.startSession();
 
   try {
     let result;
 
     await session.withTransaction(async () => {
-      const wallet = await getActiveWallet(userId, normalizedCurrency, session);
-
+      const wallet = await getActiveWallet(userId, BASE_CURRENCY, session);
       const available = fromDecimal128(wallet.availableBalance);
-
       const locked = fromDecimal128(wallet.lockedBalance);
 
       if (locked.lt(validatedAmount)) {
@@ -968,24 +758,20 @@ const releaseReservedFunds = async ({
       }
 
       const newAvailable = available.plus(validatedAmount);
-
       const newLocked = locked.minus(validatedAmount);
 
       wallet.availableBalance = toDecimal128(newAvailable);
-
       wallet.lockedBalance = toDecimal128(newLocked);
-
       wallet.lastTransactionAt = new Date();
 
-      await wallet.save({
-        session,
-      });
+      await wallet.save({ session });
 
       result = {
         wallet,
-        availableBalance: newAvailable.toFixed(8),
-        lockedBalance: newLocked.toFixed(8),
-        currency: wallet.currency,
+        availableBalance: newAvailable.toFixed(WALLET_PRECISION),
+        lockedBalance: newLocked.toFixed(WALLET_PRECISION),
+        currency: BASE_CURRENCY,
+        reference: normalizedReference,
       };
     });
 
@@ -1000,46 +786,67 @@ const releaseReservedFunds = async ({
 CONSUME RESERVED FUNDS
 =====================================================
 
-Moves:
+Removes reserved USD after a trade or other operation
+actually consumes it.
 
-LOCKED
-    ↓
-REMOVED
-
-Used when reserved money is actually spent.
-
-Example:
-
-A trade uses reserved margin.
-
-This creates a DEBIT ledger entry.
-
+The unique ledger reference prevents duplicate ledger
+entries, but a durable reservation record is still
+needed to make the entire consume operation safely
+idempotent across retries.
 =====================================================
 */
 
 const consumeReservedFunds = async ({
   userId,
   amount,
-  currency = "USD",
+  currency = BASE_CURRENCY,
   type = "TRADE",
   reference = null,
   description = null,
   metadata = {},
 }) => {
   const validatedAmount = validateAmount(amount);
-
   const ledgerType = validateLedgerType(type);
+  requireBaseCurrency(currency);
 
-  const normalizedCurrency = normalizeCurrency(currency);
+  if (!reference || !String(reference).trim()) {
+    throw new AppError("A consumption reference is required.", 400);
+  }
 
+  const normalizedReference = String(reference).trim();
   const session = await mongoose.startSession();
 
   try {
     let result;
 
     await session.withTransaction(async () => {
-      const wallet = await getActiveWallet(userId, normalizedCurrency, session);
+      const existingEntry = await LedgerEntry.findOne({
+        reference: normalizedReference,
+      }).session(session);
 
+      if (existingEntry) {
+        if (
+          existingEntry.direction !== "DEBIT" ||
+          String(existingEntry.user) !== String(userId) ||
+          existingEntry.type !== ledgerType ||
+          !fromDecimal128(existingEntry.amount).eq(validatedAmount)
+        ) {
+          throw new AppError(
+            "This reference has already been used for a different transaction.",
+            409,
+          );
+        }
+
+        result = {
+          wallet: await Wallet.findById(existingEntry.wallet).session(session),
+          ledgerEntry: existingEntry,
+          alreadyProcessed: true,
+        };
+
+        return;
+      }
+
+      const wallet = await getActiveWallet(userId, BASE_CURRENCY, session);
       const locked = fromDecimal128(wallet.lockedBalance);
 
       if (locked.lt(validatedAmount)) {
@@ -1047,29 +854,14 @@ const consumeReservedFunds = async ({
       }
 
       const newLocked = locked.minus(validatedAmount);
+      const balanceAfter = fromDecimal128(wallet.availableBalance).plus(
+        fromDecimal128(wallet.lockedBalance),
+      );
 
       wallet.lockedBalance = toDecimal128(newLocked);
-
       wallet.lastTransactionAt = new Date();
 
-      await wallet.save({
-        session,
-      });
-
-      /*
-        -------------------------------------------------
-        BALANCE AFTER
-        -------------------------------------------------
-
-        The available balance does not change here.
-
-        The money was already removed from available
-        balance when it was reserved.
-
-        Therefore the ledger's balanceAfter represents
-        the current available balance.
-        -------------------------------------------------
-        */
+      await wallet.save({ session });
 
       const ledgerEntry = await createLedgerEntry({
         wallet,
@@ -1077,8 +869,8 @@ const consumeReservedFunds = async ({
         type: ledgerType,
         direction: "DEBIT",
         amount: validatedAmount,
-        balanceAfter: fromDecimal128(wallet.availableBalance),
-        reference,
+        balanceAfter,
+        reference: normalizedReference,
         description,
         metadata,
         session,
@@ -1087,6 +879,7 @@ const consumeReservedFunds = async ({
       result = {
         wallet,
         ledgerEntry,
+        alreadyProcessed: false,
       };
     });
 
@@ -1103,9 +896,15 @@ EXPORTS
 */
 
 module.exports = {
+  SUPPORTED_CURRENCIES,
+  BASE_CURRENCY,
+  normalizeCurrency,
+  requireBaseCurrency,
+
   createWalletForUser,
   createDefaultWalletsForUser,
   getWalletForUser,
+  getActiveWallet,
 
   creditWallet,
   debitWallet,
@@ -1114,5 +913,9 @@ module.exports = {
   releaseReservedFunds,
   consumeReservedFunds,
 
+  createLedgerEntry,
+  validateAmount,
   decimalToString,
+  toDecimal128,
+  fromDecimal128,
 };

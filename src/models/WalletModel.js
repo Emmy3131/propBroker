@@ -9,7 +9,14 @@ const walletSchema = new mongoose.Schema(
       index: true,
     },
 
-    currency: {
+    baseCurrency: {
+      type: String,
+      enum: ["USD"],
+      default: "USD",
+      required: true,
+    },
+
+    displayCurrency: {
       type: String,
       enum: ["USD", "NGN", "CAD", "EUR"],
       required: true,

@@ -24,6 +24,10 @@ router.get("/", walletController.getMyWallet);
 router.get("/ledger", walletController.getMyLedger);
 
 // Actual wallet currency conversion
-router.post("/convert", walletController.convertWalletCurrency);
+router.patch(
+  "/display-currency",
+  protect,
+  walletController.updateMyDisplayCurrency
+);
 
 module.exports = router;
