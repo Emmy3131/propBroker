@@ -22,7 +22,7 @@ SUPPORTED VALUES
 =====================================================
 */
 
-const SUPPORTED_CURRENCIES = ["USD", "NGN", "CAD", "EUR"];
+const SUPPORTED_CURRENCIES = ["USD"];
 
 const SUPPORTED_PAYMENT_TYPES = [
   "bank_transfer",
@@ -112,7 +112,7 @@ exports.createDeposit = catchAsync(async (req, res, next) => {
 
   const {
     amount,
-    currency = "NGN",
+    currency = "USD",
     paymentMethodId,
     paymentAsset = null,
     paymentNetwork = null,
@@ -212,31 +212,28 @@ exports.createDeposit = catchAsync(async (req, res, next) => {
   =====================================================
   */
 
-  let wallet = await getWalletForUser(userId, normalizedCurrency);
+  /*
+=====================================================
+FIND OR CREATE THE SINGLE USD WALLET
+=====================================================
+*/
+
+  let wallet = await getWalletForUser(userId);
 
   if (!wallet) {
-    wallet = await createWalletForUser(userId, normalizedCurrency);
+    wallet = await createWalletForUser(userId, "USD");
   }
 
   if (!wallet) {
     return next(
-      new AppError(
-        `Unable to create or find your ${normalizedCurrency} wallet.`,
-        500,
-      ),
+      new AppError("Unable to retrieve or create your USD wallet.", 500),
     );
   }
-
-  /*
-  =====================================================
-  8. CHECK WALLET STATUS
-  =====================================================
-  */
 
   if (wallet.status !== "active") {
     return next(
       new AppError(
-        `Your ${normalizedCurrency} wallet is currently ${wallet.status}. Deposits are not allowed.`,
+        `Your USD wallet is currently ${wallet.status}. Deposits are not allowed.`,
         403,
       ),
     );
@@ -506,23 +503,17 @@ This is useful for the user deposit page.
 */
 
 exports.getDepositPaymentMethods = catchAsync(async (req, res) => {
-  const currency = req.query.currency
-    ? String(req.query.currency).toUpperCase()
-    : null;
-
-  const filter = {
-    status: "active",
-  };
-
-  if (currency) {
-    if (!SUPPORTED_CURRENCIES.includes(currency)) {
-      throw new AppError("Invalid currency.", 400);
-    }
-
-    filter.currency = currency;
+  if (
+    req.query.currency &&
+    String(req.query.currency).trim().toUpperCase() !== "USD"
+  ) {
+    throw new AppError("Only USD deposit methods are supported.", 400);
   }
 
-  const paymentMethods = await PaymentMethod.find(filter)
+  const paymentMethods = await PaymentMethod.find({
+    status: "active",
+    currency: "USD",
+  })
     .select(
       "name type currency bankName accountName accountNumber routingNumber iban swiftCode network walletAddress instructions displayOrder",
     )
@@ -532,7 +523,7 @@ exports.getDepositPaymentMethods = catchAsync(async (req, res) => {
     })
     .lean();
 
-  res.status(200).json({
+  return res.status(200).json({
     status: "success",
     results: paymentMethods.length,
     data: {
@@ -944,9 +935,6 @@ exports.getAdminDeposits = catchAsync(async (req, res, next) => {
 
   const volumeByCurrency = {
     USD: "0",
-    NGN: "0",
-    CAD: "0",
-    EUR: "0",
   };
 
   volumeAggregation.forEach((item) => {
@@ -1336,7 +1324,9 @@ exports.approveDeposit = catchAsync(async (req, res, next) => {
     =====================================================
     */
 
-  if (wallet.currency !== deposit.currency) {
+  const walletCurrency = wallet.baseCurrency || wallet.currency || "USD";
+
+  if (deposit.currency !== "USD" || walletCurrency !== "USD") {
     await Deposit.findByIdAndUpdate(deposit._id, {
       $set: {
         status: "under_review",

@@ -175,30 +175,25 @@ const depositSchema = new mongoose.Schema(
       required: true,
     },
 
+
+   
     /*
     =================================================
-    WALLET CURRENCY
+    DEPOSIT CURRENCY — USD ONLY
     =================================================
-
-    This is the currency that will be credited to
-    the user's wallet after admin approval.
-
-    Example:
-
-    paymentAsset = USDT
-    currency = USD
-
-    The user's USD wallet receives the approved amount.
+    All deposits are credited to the user's USD wallet.
     */
 
     currency: {
       type: String,
-      enum: ["USD", "NGN", "CAD", "EUR"],
+      enum: ["USD"],
+      default: "USD",
       required: true,
       uppercase: true,
       trim: true,
       index: true,
     },
+
 
     /*
     =================================================
@@ -266,28 +261,6 @@ const depositSchema = new mongoose.Schema(
     STATUS
     =================================================
 
-    pending:
-      Deposit created but user has not confirmed
-      payment yet.
-
-    submitted:
-      User clicked "I Have Made The Payment".
-
-    under_review:
-      Admin has started reviewing the payment.
-
-    successful:
-      Admin approved the payment and wallet was
-      successfully credited.
-
-    rejected:
-      Admin rejected the payment.
-
-    cancelled:
-      Deposit was cancelled.
-
-    expired:
-      Deposit request expired.
     */
 
     status: {
