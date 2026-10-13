@@ -256,8 +256,6 @@ ledgerEntrySchema.pre("save", function (next) {
       new Error("Ledger entries are immutable and cannot be modified."),
     );
   }
-
-  next();
 });
 
 /*
