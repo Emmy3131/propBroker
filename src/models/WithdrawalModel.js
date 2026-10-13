@@ -160,12 +160,6 @@ const withdrawalSchema = new mongoose.Schema(
       default: "bank_transfer",
     },
 
-    walletAmountUsd: {
-      type: mongoose.Schema.Types.Decimal128,
-      required: true,
-      min: 0,
-    },
-
     bankDetails: {
       bankName: {
         type: String,

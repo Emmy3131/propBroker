@@ -92,12 +92,21 @@ const maskAccountNumber = (accountNumber) =>
 const convertPayoutToUsd = async (amount, currency) => {
   const payoutAmount = toDecimal(amount);
 
+  if (!payoutAmount.isFinite() || payoutAmount.lte(0)) {
+    throw new AppError("Invalid withdrawal amount.", 400);
+  }
+
+  // USD payouts use a fixed USD-to-USD rate.
   if (currency === "USD") {
-    return payoutAmount.toDecimalPlaces(8, Decimal.ROUND_HALF_UP);
+    return {
+      walletAmountUsd: payoutAmount.toDecimalPlaces(8, Decimal.ROUND_HALF_UP),
+      exchangeRate: new Decimal(1),
+      exchangeRateUpdatedAt: new Date(),
+      exchangeRateProvider: "USD_BASE",
+    };
   }
 
   const exchange = await getExchangeRate(currency, "USD");
-
   const rate = toDecimal(exchange?.rate);
 
   if (!rate.isFinite() || rate.lte(0)) {
@@ -115,7 +124,14 @@ const convertPayoutToUsd = async (amount, currency) => {
     throw new AppError("Invalid USD withdrawal amount.", 400);
   }
 
-  return walletAmountUsd;
+  return {
+    walletAmountUsd,
+    exchangeRate: rate,
+    exchangeRateUpdatedAt: exchange?.updatedAt
+      ? new Date(exchange.updatedAt)
+      : new Date(),
+    exchangeRateProvider: exchange?.provider || "exchangeRateServices",
+  };
 };
 
 /*
@@ -236,10 +252,13 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
   }
 
   // Calculate the USD amount before opening the transaction.
-  const walletAmountUsd = await convertPayoutToUsd(
-    stringValue,
-    normalizedCurrency,
-  );
+
+  const {
+    walletAmountUsd,
+    exchangeRate,
+    exchangeRateUpdatedAt,
+    exchangeRateProvider,
+  } = await convertPayoutToUsd(stringValue, normalizedCurrency);
 
   const reference = generateWithdrawalReference();
   const session = await mongoose.startSession();
@@ -287,11 +306,16 @@ exports.createWithdrawal = catchAsync(async (req, res, next) => {
             provider: "manual",
 
             // The amount the user expects to receive.
+
             amount: mongoose.Types.Decimal128.fromString(stringValue),
             currency: normalizedCurrency,
 
-            // The amount deducted from the USD-based wallet.
             walletAmountUsd: toDecimal128(walletAmountUsd),
+            walletCurrency: "USD",
+
+            exchangeRate: toDecimal128(exchangeRate),
+            exchangeRateUpdatedAt,
+            exchangeRateProvider,
 
             status: "pending",
             payoutMethod,
