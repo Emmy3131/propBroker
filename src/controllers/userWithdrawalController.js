@@ -1042,7 +1042,10 @@ exports.rejectWithdrawal = catchAsync(async (req, res, next) => {
     return next(new AppError("Invalid withdrawal ID.", 400));
   }
 
-  if (typeof rejectionReason !== "string" || !rejectionReason.trim()) {
+  if (
+    typeof rejectionReason !== "string" ||
+    !rejectionReason.trim()
+  ) {
     return next(new AppError("Rejection reason is required.", 400));
   }
 
@@ -1065,20 +1068,54 @@ exports.rejectWithdrawal = catchAsync(async (req, res, next) => {
         );
       }
 
+      const reference = String(withdrawal.reference || "").trim();
+
+      if (!reference) {
+        throw new AppError(
+          "This withdrawal has no reference. Rejection requires manual review.",
+          409,
+        );
+      }
+
       const reservation = await WalletReservation.findOne({
-        reference: withdrawal.reference,
+        reference,
       }).session(session);
 
-      if (!reservation || reservation.status !== "held") {
+      if (!reservation) {
         throw new AppError(
-          "An active wallet reservation could not be found.",
+          "No wallet reservation exists for this withdrawal. " +
+            "The withdrawal was not rejected and no wallet balance was changed. " +
+            "Reconcile the withdrawal against the wallet balances before retrying.",
+          409,
+        );
+      }
+
+      if (reservation.status === "released") {
+        throw new AppError(
+          "The reservation has already been released. " +
+            "Verify the wallet balances and withdrawal history before retrying.",
+          409,
+        );
+      }
+
+      if (reservation.status === "consumed") {
+        throw new AppError(
+          "The reservation has already been consumed. " +
+            "This withdrawal requires manual reconciliation.",
+          409,
+        );
+      }
+
+      if (reservation.status !== "held") {
+        throw new AppError(
+          `Unexpected reservation status: "${reservation.status}".`,
           409,
         );
       }
 
       await walletReservationService.releaseFunds({
         session,
-        reference: withdrawal.reference,
+        reference,
         reason: `Withdrawal rejected: ${rejectionReason.trim()}`,
       });
 
@@ -1093,12 +1130,15 @@ exports.rejectWithdrawal = catchAsync(async (req, res, next) => {
     return res.status(200).json({
       status: "success",
       message: "Withdrawal rejected and reserved funds released.",
-      data: { withdrawal: updatedWithdrawal },
+      data: {
+        withdrawal: updatedWithdrawal,
+      },
     });
   } finally {
     await session.endSession();
   }
 });
+
 
 /*
 =====================================================
