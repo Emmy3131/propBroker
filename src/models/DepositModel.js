@@ -175,8 +175,6 @@ const depositSchema = new mongoose.Schema(
       required: true,
     },
 
-
-   
     /*
     =================================================
     DEPOSIT CURRENCY — USD ONLY
@@ -193,7 +191,6 @@ const depositSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
-
 
     /*
     =================================================
@@ -544,6 +541,23 @@ depositSchema.index({
   approvedBy: 1,
   approvedAt: -1,
 });
+
+/*
+=====================================================
+CREDIT REFERENCE — UNIQUE WHEN PRESENT
+=====================================================
+*/
+
+depositSchema.index(
+  { creditReference: 1 },
+  {
+    unique: true,
+    name: "creditReference_1",
+    partialFilterExpression: {
+      creditReference: { $type: "string" },
+    },
+  },
+);
 
 /*
 =====================================================
