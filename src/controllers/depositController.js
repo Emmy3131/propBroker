@@ -1173,373 +1173,418 @@ the ledger remains the source of financial truth.
 =====================================================
 */
 
+
+/*
+=====================================================
+ADMIN - APPROVE DEPOSIT
+=====================================================
+
+Safety rules:
+- Only USD deposits are supported.
+- Never update wallet balances directly here.
+- Reuse the same ledger reference on every retry.
+- Allow recovery if a previous attempt credited the
+  wallet but failed before finalizing the deposit.
+=====================================================
+*/
+
 exports.approveDeposit = catchAsync(async (req, res, next) => {
   validateObjectId(req.params.id, "deposit ID");
 
   const { adminNote = null } = req.body;
+  const depositId = req.params.id;
 
   /*
-    =====================================================
-    1. ATOMICALLY CLAIM THE DEPOSIT
-    =====================================================
+  =====================================================
+  1. LOAD DEPOSIT
+  =====================================================
+  */
 
-    Only one admin request can successfully change:
-
-    submitted / under_review
-                ↓
-            processing
-
-    This prevents two simultaneous approval requests
-    from both reaching creditWallet().
-    =====================================================
-    */
-
-  const deposit = await Deposit.findOneAndUpdate(
-    {
-      _id: req.params.id,
-
-      status: {
-        $in: ["submitted", "under_review"],
-      },
-    },
-
-    {
-      $set: {
-        status: "processing",
-
-        reviewedBy: req.user._id,
-
-        reviewedAt: new Date(),
-
-        adminNote: adminNote !== null ? String(adminNote).trim() : null,
-      },
-    },
-
-    {
-      new: true,
-      runValidators: true,
-    },
-  );
-
-  /*
-    =====================================================
-    2. DEPOSIT WAS NOT AVAILABLE FOR APPROVAL
-    =====================================================
-    */
+  let deposit = await Deposit.findById(depositId);
 
   if (!deposit) {
-    const existingDeposit = await Deposit.findById(req.params.id).select(
-      "status reference",
+    return next(new AppError("Deposit not found.", 404));
+  }
+
+  /*
+  =====================================================
+  2. CHECK STATUS AND CLAIM FOR PROCESSING
+  =====================================================
+  */
+
+  if (deposit.status === "successful") {
+    return next(
+      new AppError(
+        "This deposit has already been approved and credited.",
+        409,
+      ),
+    );
+  }
+
+  /*
+   * submitted / under_review:
+   * Atomically claim the deposit.
+   *
+   * processing:
+   * Continue with recovery. The stable ledger reference
+   * below prevents a second credit for the same deposit.
+   */
+
+  if (deposit.status !== "processing") {
+    const claimedDeposit = await Deposit.findOneAndUpdate(
+      {
+        _id: deposit._id,
+        status: { $in: ["submitted", "under_review"] },
+      },
+      {
+        $set: {
+          status: "processing",
+          reviewedBy: req.user._id,
+          reviewedAt: new Date(),
+          ...(adminNote !== null
+            ? { adminNote: String(adminNote).trim() }
+            : {}),
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
     );
 
-    if (!existingDeposit) {
-      return next(new AppError("Deposit not found.", 404));
-    }
-
-    if (existingDeposit.status === "successful") {
+    if (!claimedDeposit) {
       return next(
         new AppError(
-          "This deposit has already been approved and credited.",
+          "This deposit has changed status. Refresh it and try again.",
           409,
         ),
       );
     }
 
-    if (existingDeposit.status === "processing") {
+    deposit = claimedDeposit;
+  }
+
+  /*
+  =====================================================
+  3. VERIFY DEPOSIT CURRENCY
+  =====================================================
+  */
+
+  if (deposit.currency !== "USD") {
+    await Deposit.findOneAndUpdate(
+      { _id: deposit._id, status: "processing" },
+      {
+        $set: {
+          status: "under_review",
+          failureReason: "Only USD deposits can be approved.",
+        },
+      },
+    );
+
+    return next(
+      new AppError("Only USD deposits can be approved.", 400),
+    );
+  }
+
+  /*
+  =====================================================
+  4. VERIFY WALLET
+  =====================================================
+  */
+
+  let wallet = await Wallet.findById(deposit.wallet);
+
+  if (!wallet) {
+    wallet = await getWalletForUser(deposit.user);
+
+    if (!wallet) {
+      await Deposit.findOneAndUpdate(
+        { _id: deposit._id, status: "processing" },
+        {
+          $set: {
+            status: "under_review",
+            failureReason: "The deposit wallet could not be found.",
+          },
+        },
+      );
+
       return next(
         new AppError(
-          "This deposit is already being processed by another approval request.",
-          409,
+          "The wallet associated with this deposit could not be found.",
+          404,
         ),
       );
     }
+
+    // Do not silently substitute a different user's wallet.
+    if (String(wallet.user) !== String(deposit.user)) {
+      await Deposit.findOneAndUpdate(
+        { _id: deposit._id, status: "processing" },
+        {
+          $set: {
+            status: "under_review",
+            failureReason: "The deposit wallet owner does not match.",
+          },
+        },
+      );
+
+      return next(
+        new AppError(
+          "The deposit wallet does not belong to this user.",
+          400,
+        ),
+      );
+    }
+  }
+
+  if (String(wallet.user) !== String(deposit.user)) {
+    await Deposit.findOneAndUpdate(
+      { _id: deposit._id, status: "processing" },
+      {
+        $set: {
+          status: "under_review",
+          failureReason: "The deposit wallet owner does not match.",
+        },
+      },
+    );
 
     return next(
       new AppError(
-        `Deposit cannot be approved from its current status: ${existingDeposit.status}.`,
+        "The deposit wallet does not belong to this user.",
         400,
       ),
     );
   }
 
-  /*
-    =====================================================
-    3. VERIFY WALLET
-    =====================================================
-    */
-
-  const wallet = await Wallet.findById(deposit.wallet);
-
-  if (!wallet) {
-    /*
-      -----------------------------------------------
-      IMPORTANT
-
-      If the wallet disappeared after the deposit
-      was created, return the deposit to review.
-
-      We do NOT want the deposit permanently stuck
-      in processing.
-      -----------------------------------------------
-      */
-
-    await Deposit.findByIdAndUpdate(deposit._id, {
-      $set: {
-        status: "under_review",
-      },
-    });
-
-    return next(
-      new AppError(
-        "The wallet associated with this deposit could not be found.",
-        404,
-      ),
-    );
-  }
-
-  /*
-    =====================================================
-    4. VERIFY WALLET STATUS
-    =====================================================
-    */
-
   if (wallet.status !== "active") {
-    await Deposit.findByIdAndUpdate(deposit._id, {
-      $set: {
-        status: "under_review",
+    await Deposit.findOneAndUpdate(
+      { _id: deposit._id, status: "processing" },
+      {
+        $set: {
+          status: "under_review",
+          failureReason: `Wallet is ${wallet.status}.`,
+        },
       },
-    });
+    );
 
     return next(
       new AppError(
-        `The user's ${wallet.currency} wallet is currently ${wallet.status}.`,
+        `The user's wallet is currently ${wallet.status}.`,
         403,
       ),
     );
   }
 
-  /*
-    =====================================================
-    5. VERIFY WALLET CURRENCY
-    =====================================================
-    */
+  const walletCurrency = wallet.baseCurrency || wallet.currency;
 
-  const walletCurrency = wallet.baseCurrency || wallet.currency || "USD";
-
-  if (deposit.currency !== "USD" || walletCurrency !== "USD") {
-    await Deposit.findByIdAndUpdate(deposit._id, {
-      $set: {
-        status: "under_review",
+  if (walletCurrency !== "USD" || wallet.currency !== "USD") {
+    await Deposit.findOneAndUpdate(
+      { _id: deposit._id, status: "processing" },
+      {
+        $set: {
+          status: "under_review",
+          failureReason: "Deposit wallet currency is not USD.",
+        },
       },
-    });
+    );
 
     return next(
-      new AppError("Deposit currency does not match the wallet currency.", 400),
+      new AppError("The deposit wallet must use USD.", 400),
     );
   }
 
   /*
-    =====================================================
-    6. CREDIT WALLET
-    =====================================================
+  =====================================================
+  5. CREDIT THROUGH WALLET SERVICE
+  =====================================================
 
-    Your wallet service handles:
+  The ledger reference MUST remain stable across retries.
 
-    availableBalance += amount
-
-    AND
-
-    LedgerEntry creation
-
-    inside its own MongoDB transaction.
-    =====================================================
-    */
+  Do not generate a new reference when retrying.
+  Do not directly modify availableBalance here.
+  =====================================================
+  */
 
   let creditResult;
 
   try {
     creditResult = await creditWallet({
       userId: deposit.user,
-
       amount: deposit.amount.toString(),
-
       type: "DEPOSIT",
+      currency: "USD",
 
-      currency: deposit.currency,
-
-      /*
-          IMPORTANT:
-
-          Use the deposit's internal reference as
-          the financial transaction reference.
-          */
-
+      // Stable reference used by the ledger idempotency check.
       reference: deposit.reference,
 
       description: `Manual deposit approved: ${deposit.reference}`,
 
       metadata: {
         depositId: deposit._id.toString(),
-
+        depositReference: deposit.reference,
         paymentMethodId: deposit.paymentMethod
           ? deposit.paymentMethod.toString()
           : null,
-
         paymentType: deposit.paymentType,
-
-        transactionReference: deposit.transactionReference,
-
+        transactionReference: deposit.transactionReference || null,
         approvedBy: req.user._id.toString(),
       },
     });
   } catch (error) {
     /*
-      =================================================
-      CREDIT FAILED
-      =================================================
+     * Keep the deposit available for investigation/retry.
+     * Never assume a credit failed just because a request
+     * threw an error. Check the wallet ledger before any
+     * manual correction or deletion.
+     */
 
-      Return the deposit to under_review so an admin
-      can investigate/retry it.
-
-      Do NOT mark it successful.
-      =================================================
-      */
-
-    await Deposit.findByIdAndUpdate(deposit._id, {
-      $set: {
-        status: "under_review",
-
-        failureReason: error.message || "Wallet credit failed.",
+    await Deposit.findOneAndUpdate(
+      { _id: deposit._id, status: "processing" },
+      {
+        $set: {
+          status: "under_review",
+          failureReason: error.message || "Wallet credit failed.",
+        },
       },
-    });
+    );
 
     return next(error);
   }
 
   /*
-    =====================================================
-    7. MAKE SURE LEDGER ENTRY WAS CREATED
-    =====================================================
-    */
+  =====================================================
+  6. VERIFY CREDIT RESULT
+  =====================================================
+  */
 
   if (!creditResult || !creditResult.ledgerEntry) {
-    /*
-      This should never happen because creditWallet()
-      creates the ledger entry as part of its transaction.
-      */
-
-    await Deposit.findByIdAndUpdate(deposit._id, {
-      $set: {
-        status: "under_review",
-
-        failureReason: "Wallet was credited but no ledger entry was returned.",
+    await Deposit.findOneAndUpdate(
+      { _id: deposit._id, status: "processing" },
+      {
+        $set: {
+          status: "under_review",
+          failureReason:
+            "No ledger entry was returned. Verify the wallet ledger.",
+        },
       },
-    });
+    );
 
     return next(
       new AppError(
-        "Deposit credit completed without a ledger entry. Manual investigation is required.",
+        "The wallet service did not return a ledger entry. Verify the ledger before retrying.",
         500,
       ),
     );
   }
 
   /*
-    =====================================================
-    8. MARK DEPOSIT SUCCESSFUL
-    =====================================================
-    */
+  =====================================================
+  7. FINALIZE DEPOSIT
+  =====================================================
 
-  const successfulDeposit = await Deposit.findOneAndUpdate(
-    {
-      _id: deposit._id,
+  Use a namespaced creditReference, separate from the
+  public/internal deposit reference. This avoids collisions
+  with other records if creditReference has a unique index.
 
-      /*
-          Make sure nobody changed the deposit while
-          the wallet credit was happening.
-          */
+  The value is deterministic for this deposit, so retries
+  always reuse the same value.
+  =====================================================
+  */
 
-      status: "processing",
-    },
+  const creditReference = `deposit-credit-${deposit._id.toString()}`;
 
-    {
-      $set: {
-        status: "successful",
+  let successfulDeposit;
 
-        approvedBy: req.user._id,
-
-        approvedAt: new Date(),
-
-        creditedAt: new Date(),
-
-        ledgerEntry: creditResult.ledgerEntry._id,
-
-        creditReference: deposit.reference,
-
-        reviewedBy: deposit.reviewedBy || req.user._id,
-
-        reviewedAt: deposit.reviewedAt || new Date(),
-
-        failureReason: null,
+  try {
+    successfulDeposit = await Deposit.findOneAndUpdate(
+      {
+        _id: deposit._id,
+        status: "processing",
       },
-    },
+      {
+        $set: {
+          status: "successful",
+          approvedBy: req.user._id,
+          approvedAt: new Date(),
+          creditedAt: new Date(),
+          ledgerEntry: creditResult.ledgerEntry._id,
+          creditReference,
+          reviewedBy: deposit.reviewedBy || req.user._id,
+          reviewedAt: deposit.reviewedAt || new Date(),
+          failureReason: null,
+          ...(adminNote !== null
+            ? { adminNote: String(adminNote).trim() }
+            : {}),
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      },
+    );
+  } catch (error) {
+    /*
+     * A finalization error does not prove that the wallet
+     * credit failed. Leave the deposit recoverable and
+     * preserve the ledger entry for reconciliation.
+     */
 
-    {
-      new: true,
-      runValidators: true,
-    },
-  );
+    await Deposit.findOneAndUpdate(
+      { _id: deposit._id, status: "processing" },
+      {
+        $set: {
+          failureReason:
+            error.message ||
+            "Wallet credit completed, but deposit finalization failed.",
+        },
+      },
+    );
+
+    return next(error);
+  }
 
   /*
-    =====================================================
-    9. FINAL SAFETY CHECK
-    =====================================================
-    */
+  =====================================================
+  8. FINAL SAFETY CHECK
+  =====================================================
+  */
 
   if (!successfulDeposit) {
     return next(
       new AppError(
-        "Wallet credit completed, but the deposit status could not be finalized. Manual investigation is required.",
+        "The wallet credit was processed, but the deposit could not be finalized. Retry safely after checking the ledger.",
         500,
       ),
     );
   }
 
   /*
-    =====================================================
-    10. RESPONSE
-    =====================================================
-    */
+  =====================================================
+  9. RESPONSE
+  =====================================================
+  */
 
   return res.status(200).json({
     status: "success",
-
-    message:
-      "Deposit approved successfully and the user's wallet has been credited.",
-
+    message: creditResult.alreadyProcessed
+      ? "Deposit approval recovered successfully. The existing wallet credit was reused."
+      : "Deposit approved successfully and the user's wallet has been credited.",
     data: {
       depositId: successfulDeposit._id,
-
       reference: successfulDeposit.reference,
-
       amount: successfulDeposit.amount.toString(),
-
       currency: successfulDeposit.currency,
-
       status: successfulDeposit.status,
-
-      walletId: deposit.wallet,
-
+      walletId: wallet._id,
       ledgerEntryId: creditResult.ledgerEntry._id,
-
+      alreadyProcessed: Boolean(creditResult.alreadyProcessed),
       approvedBy: successfulDeposit.approvedBy,
-
       approvedAt: successfulDeposit.approvedAt,
-
       creditedAt: successfulDeposit.creditedAt,
     },
   });
 });
+
 
 /*
 =====================================================
