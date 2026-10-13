@@ -16,10 +16,15 @@ const adminRoutes = require("./src/routes/adminRoutes");
 const adminUserRoutes = require("./src/routes/adminUserRoutes");
 const adminDepositRoutes = require("./src/routes/adminDepositeRoutes");
 const adminWithdrawalRoutes = require("./src/routes/adminWithdrawalRoutes");
-const userWithdrawalRoutes = require("./src/routes/userWithdrawalRoutes")
+const userWithdrawalRoutes = require("./src/routes/userWithdrawalRoutes");
 const sessionRoutes = require("./src/routes/sessionRoutes");
 const paymentMethodRoutes = require("./src/routes/paymentMethodRoutes");
 const depositRoutes = require("./src/routes/depositRoutes");
+
+//Trading account and market routes
+const tradingAccountRoutes = require("./src/routes/tradingAccountRoutes");
+const marketRoutes = require("./src/routes/marketRoutes");
+const tradingRoutes = require("./src/routes/tradingRoutes");
 
 
 
@@ -179,6 +184,12 @@ app.use("/api/v1/admin/withdrawals", adminWithdrawalRoutes);
 app.use("/api/v1/withdrawals", userWithdrawalRoutes);
 app.use("/api/v1/auth/sessions", sessionRoutes);
 app.use("/api/v1/payment-methods", paymentMethodRoutes);
+
+
+//Trading account routes
+app.use("/api/v1/trading-accounts", tradingAccountRoutes);
+app.use("/api/v1/market", marketRoutes);
+app.use("/api/v1/trading", tradingRoutes);
 
 /*
 =====================================================
