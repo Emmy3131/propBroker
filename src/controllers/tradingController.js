@@ -4,6 +4,7 @@ const TradingOrder = require("../models/TradingOrderModel");
 const TradingPosition = require("../models/TradingPositionModel");
 const tradingExecutionService = require("../services/tradingExecutionService");
 const positionManagementService = require("../services/positionManagementServices");
+const positionRiskService = require("../services/positionRiskService");
 
 const getUserId = (req) => req.user?._id || req.user?.id;
 
@@ -176,6 +177,51 @@ exports.closePosition = async (req, res) => {
       message: isClientError
         ? error.message
         : "Unable to close the position. Please try again.",
+    });
+  }
+};
+
+exports.updatePositionRisk = async (req, res) => {
+  try {
+    const userId = getUserId(req);
+
+    if (!userId) {
+      return res.status(401).json({
+        status: "error",
+        message: "Authentication is required.",
+      });
+    }
+
+    const { stopLoss, takeProfit } = req.body || {};
+
+    const position = await positionRiskService.updatePositionRisk({
+      userId,
+      positionId: req.params.id,
+      stopLoss,
+      takeProfit,
+      body: req.body || {},
+    });
+
+    return res.status(200).json({
+      status: "success",
+      message: "Position risk settings updated successfully.",
+      data: { position },
+    });
+  } catch (error) {
+    const statusCode = Number.isInteger(error.statusCode)
+      ? error.statusCode
+      : 500;
+
+    if (statusCode >= 500) {
+      console.error("Update position risk error:", error);
+    }
+
+    return res.status(statusCode).json({
+      status: "error",
+      message:
+        statusCode >= 500
+          ? "Unable to update position risk settings. Please try again."
+          : error.message,
     });
   }
 };

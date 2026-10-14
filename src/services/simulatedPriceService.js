@@ -6,13 +6,20 @@ const TradingPosition = require("../models/TradingPositionModel");
 const TradingAccount = require("../models/TradingAccountModel");
 const tradingRiskService = require("./tradingRiskService");
 const positionLiquidationService = require("./positionLiquidationServices");
+const positionManagementService = require("./positionManagementService");
 
 const decimal = (value, label) => {
   if (value === undefined || value === null) {
     throw new Error(`${label} is missing.`);
   }
 
-  const result = new Decimal(value.toString());
+  let result;
+
+  try {
+    result = new Decimal(value.toString());
+  } catch {
+    throw new Error(`${label} is invalid.`);
+  }
 
   if (!result.isFinite()) {
     throw new Error(`${label} is invalid.`);
@@ -22,7 +29,9 @@ const decimal = (value, label) => {
 };
 
 const decimal128 = (value) =>
-  mongoose.Types.Decimal128.fromString(value.toFixed(8));
+  mongoose.Types.Decimal128.fromString(
+    value.toDecimalPlaces(8, Decimal.ROUND_HALF_UP).toFixed(8),
+  );
 
 const calculatePositionPnl = (position, price) => {
   const entryPrice = decimal(position.entryPrice, "Entry price");
@@ -36,6 +45,38 @@ const calculatePositionPnl = (position, price) => {
   }
 
   return pnl;
+};
+
+// Determine whether a position has reached a stop-loss or take-profit.
+// If a price jump crosses both levels, prioritize the stop-loss.
+const getTriggeredExit = (position, price) => {
+  const stopLoss =
+    position.stopLoss == null ? null : decimal(position.stopLoss, "Stop-loss");
+
+  const takeProfit =
+    position.takeProfit == null
+      ? null
+      : decimal(position.takeProfit, "Take-profit");
+
+  if (position.side === "buy") {
+    if (stopLoss && price.lte(stopLoss)) {
+      return "stop_loss";
+    }
+
+    if (takeProfit && price.gte(takeProfit)) {
+      return "take_profit";
+    }
+  } else if (position.side === "sell") {
+    if (stopLoss && price.gte(stopLoss)) {
+      return "stop_loss";
+    }
+
+    if (takeProfit && price.lte(takeProfit)) {
+      return "take_profit";
+    }
+  }
+
+  return null;
 };
 
 exports.updateSimulatedPrice = async ({ symbol, price }) => {
@@ -54,9 +95,15 @@ exports.updateSimulatedPrice = async ({ symbol, price }) => {
   }
 
   const session = await mongoose.startSession();
-  let result;
+
+  let instrumentId;
+  let updatedPositions = 0;
+  let affectedAccountIds = [];
+  let triggeredPositions = [];
+  let priceUpdatedAt;
 
   try {
+    // Transaction 1: persist the price and mark positions to market.
     await session.withTransaction(async () => {
       const instrument = await MarketInstrument.findOne({
         symbol: normalizedSymbol,
@@ -76,19 +123,21 @@ exports.updateSimulatedPrice = async ({ symbol, price }) => {
         );
       }
 
-      // Save the new simulated market price.
       instrument.currentPrice = decimal128(newPrice);
       instrument.priceUpdatedAt = new Date();
 
       await instrument.save({ session });
 
-      // Find all open positions for this instrument.
+      instrumentId = instrument._id;
+      priceUpdatedAt = instrument.priceUpdatedAt;
+
       const positions = await TradingPosition.find({
         instrument: instrument._id,
         status: "open",
       }).session(session);
 
-      const affectedAccountIds = new Set();
+      const accounts = new Set();
+      const triggered = [];
 
       for (const position of positions) {
         const pnl = calculatePositionPnl(position, newPrice);
@@ -98,14 +147,95 @@ exports.updateSimulatedPrice = async ({ symbol, price }) => {
 
         await position.save({ session });
 
-        affectedAccountIds.add(position.tradingAccount.toString());
+        accounts.add(position.tradingAccount.toString());
+
+        const exitReason = getTriggeredExit(position, newPrice);
+
+        if (exitReason) {
+          triggered.push({
+            positionId: position._id.toString(),
+            userId: position.user.toString(),
+            reason: exitReason,
+          });
+        }
       }
 
-      // Recalculate each affected account from its open positions.
+      updatedPositions = positions.length;
+      affectedAccountIds = [...accounts];
+      triggeredPositions = triggered;
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  // Close triggered positions through the existing position-management
+  // service so realized P&L and margin are settled consistently.
+  const automaticClosures = [];
+  const closureFailures = [];
+
+  for (const triggered of triggeredPositions) {
+    try {
+      const closeResult = await positionManagementService.closePosition({
+        userId: triggered.userId,
+        positionId: triggered.positionId,
+      });
+
+      automaticClosures.push({
+        positionId: triggered.positionId,
+        reason: triggered.reason,
+        realizedPnl: closeResult.realizedPnl,
+        status: "closed",
+      });
+    } catch (error) {
+      // A manual close or risk liquidation may have won the race.
+      let currentPosition;
+
+      try {
+        currentPosition = await TradingPosition.findById(
+          triggered.positionId,
+        ).select("status");
+      } catch (lookupError) {
+        console.error(
+          "Unable to verify triggered position:",
+          triggered.positionId,
+          lookupError,
+        );
+      }
+
+      if (currentPosition?.status === "closed") {
+        automaticClosures.push({
+          positionId: triggered.positionId,
+          reason: triggered.reason,
+          status: "already_closed",
+        });
+
+        continue;
+      }
+
+      closureFailures.push({
+        positionId: triggered.positionId,
+        reason: triggered.reason,
+        status: currentPosition ? currentPosition.status : "unknown",
+        message: error.message,
+      });
+
+      console.error(
+        "Automatic SL/TP closure failed:",
+        triggered.positionId,
+        error,
+      );
+    }
+  }
+
+  // Recalculate affected accounts using their remaining open positions.
+  // This also evaluates risk when no stop-loss or take-profit was triggered.
+  const riskSession = await mongoose.startSession();
+
+  try {
+    await riskSession.withTransaction(async () => {
       for (const accountId of affectedAccountIds) {
-        const account = await TradingAccount.findOne({
-          _id: accountId,
-        }).session(session);
+        const account =
+          await TradingAccount.findById(accountId).session(riskSession);
 
         if (!account) {
           continue;
@@ -114,14 +244,14 @@ exports.updateSimulatedPrice = async ({ symbol, price }) => {
         const openPositions = await TradingPosition.find({
           tradingAccount: account._id,
           status: "open",
-        }).session(session);
+        }).session(riskSession);
 
         let totalUnrealizedPnl = new Decimal(0);
         let totalUsedMargin = new Decimal(0);
 
         for (const position of openPositions) {
           totalUnrealizedPnl = totalUnrealizedPnl.plus(
-            decimal(position.unrealizedPnl, "Position P&L"),
+            decimal(position.unrealizedPnl, "Position unrealized P&L"),
           );
 
           totalUsedMargin = totalUsedMargin.plus(
@@ -130,50 +260,53 @@ exports.updateSimulatedPrice = async ({ symbol, price }) => {
         }
 
         const balance = decimal(account.balance, "Account balance");
-        const equity = balance.plus(totalUnrealizedPnl);
+        const rawEquity = balance.plus(totalUnrealizedPnl);
+        const equity = Decimal.max(0, rawEquity);
         const freeMargin = Decimal.max(0, equity.minus(totalUsedMargin));
 
         account.unrealizedPnl = decimal128(totalUnrealizedPnl);
         account.usedMargin = decimal128(totalUsedMargin);
-        account.equity = decimal128(Decimal.max(0, equity));
+        account.equity = decimal128(equity);
         account.freeMargin = decimal128(freeMargin);
 
         const highestEquity = decimal(account.highestEquity, "Highest equity");
 
-        if (equity.greaterThan(highestEquity)) {
+        if (equity.gt(highestEquity)) {
           account.highestEquity = decimal128(equity);
         }
 
-        // Basic safety stop. Full drawdown rules come next.
-        if (equity.lte(0) && account.status !== "breached") {
+        if (
+          rawEquity.lte(0) &&
+          !["breached", "completed", "closed"].includes(account.status)
+        ) {
           account.status = "breached";
           account.breachedAt = new Date();
         }
 
         const riskResult = await tradingRiskService.evaluateAccountRisk(
           account,
-          session,
+          riskSession,
         );
 
         if (riskResult.account.status === "breached") {
           await positionLiquidationService.liquidateAccountPositions({
             accountId: account._id,
-            session,
+            session: riskSession,
           });
         }
       }
-
-      result = {
-        symbol: instrument.symbol,
-        price: newPrice.toFixed(8),
-        updatedPositions: positions.length,
-        updatedAccounts: affectedAccountIds.size,
-        priceUpdatedAt: instrument.priceUpdatedAt,
-      };
     });
-
-    return result;
   } finally {
-    await session.endSession();
+    await riskSession.endSession();
   }
+
+  return {
+    symbol: normalizedSymbol,
+    price: newPrice.toFixed(8),
+    updatedPositions,
+    updatedAccounts: affectedAccountIds.length,
+    automaticClosures,
+    closureFailures,
+    priceUpdatedAt,
+  };
 };

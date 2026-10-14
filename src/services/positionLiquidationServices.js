@@ -35,7 +35,7 @@ exports.liquidateAccountPositions = async ({ accountId, session }) => {
     throw new Error("Trading account not found.");
   }
 
-  if (account.status !== "breached") {
+ if (!["breached", "completed"].includes(account.status)) { 
     return {
       liquidated: false,
       reason: "account_not_breached",

@@ -17,6 +17,9 @@ router.get("/orders", tradingController.getMyOrders);
 // View the authenticated user's positions.
 router.get("/positions", tradingController.getMyPositions);
 
+// Update SL/TP on an open position.
+router.patch("/positions/:id/risk", tradingController.updatePositionRisk);
+
 // Close a specific position by ID.
 router.post("/positions/:id/close", tradingController.closePosition);
 
