@@ -6,6 +6,7 @@ const TradingPosition = require("../models/TradingPositionModel");
 const MarketInstrument = require("../models/MarketInstrumentModel");
 const tradingRiskService = require("./tradingRiskService");
 const positionLiquidationService = require("./positionLiquidationServices");
+const tradingEquitySnapshotService = require("./tradingEquitySnapshopServices");
 
 const toDecimal = (value, fieldName) => {
   if (value === undefined || value === null) {
@@ -200,6 +201,12 @@ exports.closePosition = async ({ userId, positionId }) => {
           session,
         });
       }
+
+      await tradingEquitySnapshotService.recordSnapshot({
+        accountId: account._id,
+        session,
+        event: "position_closed",
+      });
 
       result = {
         position,

@@ -1,8 +1,7 @@
 const express = require("express");
-
 const tradingAccountController = require("../controllers/tradingAccountController");
-
 const { protect } = require("../middlewares/authMiddlewares");
+const tradingEquityController = require("../controllers/tradingEquityController");
 
 const router = express.Router();
 
@@ -17,5 +16,11 @@ router.get("/", tradingAccountController.getMyTradingAccounts);
 
 // Retrieve one account belonging to the logged-in user.
 router.get("/:id", tradingAccountController.getMyTradingAccount);
+
+// Update the logged-in user's trading account.
+router.get(
+  "/:accountId/equity-history",
+  tradingEquityController.getEquityHistory,
+);
 
 module.exports = router;

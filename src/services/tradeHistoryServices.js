@@ -27,6 +27,42 @@ const getOwnedAccount = async (userId, accountId) => {
   return account;
 };
 
+/*
+=====================================================
+DATE FILTER HELPERS
+=====================================================
+A date-only "to" value includes the entire selected day.
+
+For example:
+to=2026-10-14
+includes trades closed throughout October 14.
+
+Datetime values remain precise.
+=====================================================
+*/
+
+const parseDateFilter = (value, isEndDate = false) => {
+  if (!value) return null;
+
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value);
+  const parsed = new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("Invalid date filter.");
+  }
+
+  // Reject impossible calendar dates such as 2026-02-31.
+  if (isDateOnly && parsed.toISOString().slice(0, 10) !== value) {
+    throw new Error("Invalid date filter.");
+  }
+
+  if (isDateOnly && isEndDate) {
+    parsed.setUTCDate(parsed.getUTCDate() + 1);
+  }
+
+  return parsed;
+};
+
 const buildClosedTradeFilter = ({
   userId,
   accountId,
@@ -51,15 +87,30 @@ const buildClosedTradeFilter = ({
     filter.realizedPnl = { $eq: 0 };
   }
 
-  if (from || to) {
+  const startDate = parseDateFilter(from);
+  const endDate = parseDateFilter(to, true);
+
+  if (startDate || endDate) {
     filter.closedAt = {};
 
-    if (from) filter.closedAt.$gte = new Date(from);
-    if (to) filter.closedAt.$lte = new Date(to);
+    if (startDate) {
+      filter.closedAt.$gte = startDate;
+    }
+
+    if (endDate) {
+      // Exclusive end boundary handles date-only filters correctly.
+      filter.closedAt.$lt = endDate;
+    }
   }
 
   return filter;
 };
+
+/*
+=====================================================
+TRADE HISTORY
+=====================================================
+*/
 
 exports.getTradeHistory = async ({
   userId,
@@ -89,7 +140,24 @@ exports.getTradeHistory = async ({
   const [trades, total] = await Promise.all([
     TradingPosition.find(filter)
       .select(
-        "tradingAccount instrument order symbol side quantity contractSize entryPrice closePrice currentPrice realizedPnl status openedAt closedAt createdAt updatedAt",
+        [
+          "tradingAccount",
+          "instrument",
+          "order",
+          "symbol",
+          "side",
+          "quantity",
+          "contractSize",
+          "entryPrice",
+          "closePrice",
+          "currentPrice",
+          "realizedPnl",
+          "status",
+          "openedAt",
+          "closedAt",
+          "createdAt",
+          "updatedAt",
+        ].join(" ")
       )
       .populate("tradingAccount", "accountNumber accountType")
       .populate("instrument", "symbol name assetClass")
@@ -114,6 +182,18 @@ exports.getTradeHistory = async ({
   };
 };
 
+/*
+=====================================================
+ACCOUNT PERFORMANCE
+=====================================================
+Performance metrics use closed positions.
+
+Current drawdown below means loss relative to the
+initial balance. It is NOT historical peak-to-trough
+maximum drawdown; that requires equity snapshots.
+=====================================================
+*/
+
 exports.getAccountPerformance = async ({ userId, accountId }) => {
   const account = await getOwnedAccount(userId, accountId);
 
@@ -128,6 +208,7 @@ exports.getAccountPerformance = async ({ userId, accountId }) => {
   let grossProfit = new Decimal(0);
   let grossLoss = new Decimal(0);
   let netProfit = new Decimal(0);
+
   let winningTrades = 0;
   let losingTrades = 0;
   let breakevenTrades = 0;
@@ -160,28 +241,43 @@ exports.getAccountPerformance = async ({ userId, accountId }) => {
   const equity = toDecimal(account.equity);
   const unrealizedPnl = toDecimal(account.unrealizedPnl);
   const highestEquity = toDecimal(account.highestEquity);
-
   const profitTargetPercent = toDecimal(account.profitTargetPercent);
 
-  const targetProfit = initialBalance.times(profitTargetPercent.div(100));
+  const targetProfit = initialBalance.times(
+    profitTargetPercent.div(100)
+  );
 
+  // Equity includes unrealized P&L, so this is current account
+  // profit toward the target, not realized P&L alone.
   const achievedProfit = equity.minus(initialBalance);
 
-  const targetProgress = targetProfit.gt(0)
-    ? achievedProfit.div(targetProfit).times(100)
-    : new Decimal(0);
+  const targetProgress =
+    targetProfit.gt(0)
+      ? achievedProfit.div(targetProfit).times(100)
+      : new Decimal(0);
 
-  const drawdownAmount = Decimal.max(0, initialBalance.minus(equity));
+  // This metric is measured from initial balance, consistent
+  // with the platform's fixed initial-balance drawdown rules.
+  const currentDrawdownAmount = Decimal.max(
+    0,
+    initialBalance.minus(equity)
+  );
 
-  const drawdownPercent = initialBalance.gt(0)
-    ? drawdownAmount.div(initialBalance).times(100)
-    : new Decimal(0);
+  const currentDrawdownPercent =
+    initialBalance.gt(0)
+      ? currentDrawdownAmount.div(initialBalance).times(100)
+      : new Decimal(0);
 
-  const profitFactor = grossLoss.gt(0) ? grossProfit.div(grossLoss) : null;
+  const profitFactor =
+    grossLoss.gt(0)
+      ? Number(grossProfit.div(grossLoss).toFixed(2))
+      : null;
 
   const winRate =
     totalClosedTrades > 0
-      ? new Decimal(winningTrades).div(totalClosedTrades).times(100)
+      ? new Decimal(winningTrades)
+          .div(totalClosedTrades)
+          .times(100)
       : new Decimal(0);
 
   return {
@@ -210,21 +306,25 @@ exports.getAccountPerformance = async ({ userId, accountId }) => {
       grossProfit: money(grossProfit),
       grossLoss: money(grossLoss.negated()),
       netRealizedPnl: money(netProfit),
-      profitFactor:
-        profitFactor === null ? null : Number(profitFactor.toFixed(2)),
+      profitFactor,
       buyTrades,
       sellTrades,
     },
 
     challenge: {
-      profitTargetPercent: Number(profitTargetPercent.toString()),
+      profitTargetPercent: Number(
+        profitTargetPercent.toString()
+      ),
       targetProfit: money(targetProfit),
       achievedProfit: money(achievedProfit),
       targetProgressPercent: Number(
-        Decimal.max(0, Decimal.min(100, targetProgress)).toFixed(2),
+        Decimal.max(
+          0,
+          Decimal.min(100, targetProgress)
+        ).toFixed(2)
       ),
-      drawdownAmount: money(drawdownAmount),
-      drawdownPercent: money(drawdownPercent),
+      drawdownAmount: money(currentDrawdownAmount),
+      drawdownPercent: money(currentDrawdownPercent),
       highestEquity: money(highestEquity),
       isDemo: account.accountType === "demo",
     },

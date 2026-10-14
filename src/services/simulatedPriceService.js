@@ -7,6 +7,7 @@ const TradingAccount = require("../models/TradingAccountModel");
 const tradingRiskService = require("./tradingRiskService");
 const positionLiquidationService = require("./positionLiquidationServices");
 const positionManagementService = require("./positionManagementServices");
+const tradingEquitySnapshotService = require("./tradingEquitySnapshopServices");
 
 const decimal = (value, label) => {
   if (value === undefined || value === null) {
@@ -294,6 +295,12 @@ exports.updateSimulatedPrice = async ({ symbol, price }) => {
             session: riskSession,
           });
         }
+
+        await tradingEquitySnapshotService.recordSnapshot({
+          accountId: account._id,
+          session: riskSession,
+          event: "price_update",
+        });
       }
     });
   } finally {
