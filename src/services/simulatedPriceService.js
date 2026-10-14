@@ -6,7 +6,7 @@ const TradingPosition = require("../models/TradingPositionModel");
 const TradingAccount = require("../models/TradingAccountModel");
 const tradingRiskService = require("./tradingRiskService");
 const positionLiquidationService = require("./positionLiquidationServices");
-const positionManagementService = require("./positionManagementService");
+const positionManagementService = require("./positionManagementServices");
 
 const decimal = (value, label) => {
   if (value === undefined || value === null) {

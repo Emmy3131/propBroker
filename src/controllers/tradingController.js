@@ -4,7 +4,7 @@ const TradingOrder = require("../models/TradingOrderModel");
 const TradingPosition = require("../models/TradingPositionModel");
 const tradingExecutionService = require("../services/tradingExecutionService");
 const positionManagementService = require("../services/positionManagementServices");
-const positionRiskService = require("../services/positionRiskService");
+const positionRiskService = require("../services/positionRiskServices");
 
 const getUserId = (req) => req.user?._id || req.user?.id;
 
